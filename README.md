@@ -7,6 +7,8 @@ your terminal status line, with no daemon process required.
 Sonnet 4.6 | main | ctx:42% | 5h:68% ~1h12m | 7d:31% ~4d2h
 ```
 
+![Windows 11 statusline screenshot](windows11.png)
+
 Works on **Windows 11** (PowerShell — no extra dependencies) and
 **Linux / WSL2** (bash + `jq`).  
 
