@@ -4,11 +4,17 @@ Displays your Claude Code OAuth quota (5-hour session % and weekly %) live in
 your terminal status line, with no daemon process required.
 
 ```
-claude-sonnet-4-6 │ abc12345 │ ctx:42% │ 5h:68% ↻1 hr 12 min │ my-project │ (main)
+Sonnet 4.6 | main | ctx:42% | 5h:68% ~1h12m | 7d:31% ~4d2h
 ```
 
 Works on **Windows 11** (PowerShell — no extra dependencies) and
-**Linux / WSL2** (bash + `jq`).
+**Linux / WSL2** (bash + `jq`).  
+
+Based on the work in:
+- https://github.com/jonis100/claude-quota-tracker
+- https://github.com/ryoppippi/ccusage
+- https://github.com/pcvelz/ccstatusline-usage#-quick-start
+- ...and my own ugly hack https://github.com/aweussom/claude-quota-scraper
 
 ---
 
