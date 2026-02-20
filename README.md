@@ -299,6 +299,25 @@ Both the PowerShell and bash libraries write the same format, so the cache is
 shared if you use both (e.g. running Claude Code natively on Windows while also
 using WSL2).
 
+## Proof of concept: Chrome/Edge scraper
+
+`claude_quota_chrome.ps1` is an alternative fetcher that reads quota data
+directly from the `claude.ai/settings/usage` page using Claude Code's built-in
+`--chrome` flag (requires the **Claude in Chrome** extension and an active
+login session in Edge or Chrome).
+
+It is a proof of concept — not needed for normal use — but it does extract
+quota figures correctly without touching the OAuth API.
+
+```powershell
+.\claude_quota_chrome.ps1
+```
+
+Pass `-Raw` to see the unprocessed Claude CLI output, or `-OutputFile path.json`
+to write the result to a file.
+
+---
+
 ## Notes
 
 - The OAuth beta header (`oauth-2025-04-20`) may need updating if Anthropic
