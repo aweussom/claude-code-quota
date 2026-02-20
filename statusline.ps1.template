@@ -1,0 +1,106 @@
+#
+# statusline.ps1 — Claude Code status line (installed by claude-code-quota)
+#
+# Output example:
+#   Sonnet 4.6 | main │ ctx:42% │ 5h:68% ~1 hr 12 min │ 7d:31% ~4 d 2 hr 5 min
+#
+# Edit this file freely. Requires quota-lib.ps1 in %USERPROFILE%\.claude\
+
+# ── Read session JSON from stdin ──────────────────────────────────────────────
+$sessionRaw = [Console]::In.ReadToEnd()
+if ([string]::IsNullOrWhiteSpace($sessionRaw)) { exit 0 }
+try   { $session = $sessionRaw | ConvertFrom-Json }
+catch { Write-Output "ctx:?%"; exit 0 }
+
+# ── Model + thinking level ────────────────────────────────────────────────────
+$modelLabel = ""
+if (-not [string]::IsNullOrWhiteSpace($session.model)) {
+    $m = $session.model
+    # Map model ID → friendly name: claude-sonnet-4-6 → "Sonnet 4.6"
+    if ($m -match 'claude-(opus|sonnet|haiku)-(\d+)-(\d+)') {
+        $family     = (Get-Culture).TextInfo.ToTitleCase($Matches[1])
+        $modelLabel = "$family $($Matches[2]).$($Matches[3])"
+    } else {
+        $modelLabel = $m  # fallback: raw ID
+    }
+    # Append thinking indicator if budget tokens are set
+    if ($session.thinking_budget_tokens -and [int]$session.thinking_budget_tokens -gt 0) {
+        $modelLabel += " (thinking)"
+    }
+}
+
+# ── Git branch ────────────────────────────────────────────────────────────────
+$gitBranch = ""
+$repoDir = $session.cwd
+if (-not [string]::IsNullOrWhiteSpace($repoDir) -and (Test-Path $repoDir -PathType Container)) {
+    try {
+        $branch = & git -C $repoDir branch --show-current 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($branch)) {
+            $gitBranch = $branch.Trim()
+        }
+    } catch {}
+}
+
+# ── Context window ────────────────────────────────────────────────────────────
+$ctxPct = ""
+if ($session.context_window -and $null -ne $session.context_window.used_percentage) {
+    $ctxPct = [int][math]::Round([double]$session.context_window.used_percentage)
+}
+
+# ── Quota (via quota-lib.ps1) ─────────────────────────────────────────────────
+$libPath = "$env:USERPROFILE\.claude\quota-lib.ps1"
+if (Test-Path $libPath -PathType Leaf) {
+    . $libPath
+    # 60 s TTL while a session is active (transcript recently written); 5 min while idle
+    $ttl = 300
+    if ($session.transcript_path -and (Test-Path $session.transcript_path -PathType Leaf)) {
+        $tAge = ([DateTimeOffset]::UtcNow -
+                 (Get-Item $session.transcript_path -ErrorAction SilentlyContinue).LastWriteTimeUtc).TotalSeconds
+        if ($tAge -lt 300) { $ttl = 60 }
+    }
+    Invoke-QuotaGet -Ttl $ttl
+}
+
+# ── ANSI colours (Windows Terminal, VS Code, pwsh 7+) ────────────────────────
+if ($env:WT_SESSION -or $env:TERM_PROGRAM -or ($PSVersionTable.PSVersion.Major -ge 7)) {
+    $cGreen = "`e[32m"; $cYellow = "`e[33m"; $cRed = "`e[31m"; $cReset = "`e[0m"
+} else {
+    $cGreen = ""; $cYellow = ""; $cRed = ""; $cReset = ""
+}
+
+# ── Assemble parts ────────────────────────────────────────────────────────────
+$parts = [System.Collections.Generic.List[string]]::new()
+
+if ($modelLabel -ne "") {
+    $label = $modelLabel
+    if ($gitBranch -ne "") { $label += " | $gitBranch" }
+    $parts.Add($label)
+} elseif ($gitBranch -ne "") {
+    $parts.Add($gitBranch)
+}
+
+if ($ctxPct -ne "") {
+    $parts.Add("ctx:${ctxPct}%")
+}
+
+$qpct     = $QuotaResult['pct']
+$resetsIn = $QuotaResult['resets_in']
+$isStale  = $QuotaResult['stale'] -eq 'true'
+if ($qpct -ne "") {
+    $n     = [double]$qpct
+    $color = if ($n -gt 75) { $cRed } elseif ($n -gt 50) { $cYellow } else { $cGreen }
+    $label = "${qpct}%"
+    if ($isStale)  { $label += "⚠" }
+    if ($resetsIn) { $label += " ~$resetsIn" }
+    $parts.Add("${color}5h:${label}${cReset}")
+}
+
+$wpct    = $QuotaResult['weekly_pct']
+$wresets = $QuotaResult['weekly_resets_in']
+if ($wpct -ne "") {
+    $label = "${wpct}%"
+    if ($wresets) { $label += " ~$wresets" }
+    $parts.Add("7d:$label")
+}
+
+Write-Output ($parts -join " | ")
