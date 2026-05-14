@@ -136,7 +136,7 @@ Write-Hdr "Statusline integration"
 $pwshCmd        = if ($pwshAvail) { "pwsh" } else { "powershell" }
 $statuslineDst  = "$ClaudeDir\statusline.ps1"
 $statuslineAbs  = $statuslineDst -replace '\\', '/'
-$settingsCmd    = "$pwshCmd -NonInteractive -ExecutionPolicy Bypass -File $statuslineAbs"
+$settingsCmd    = "$pwshCmd -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $statuslineAbs"
 $settingsPath   = "$ClaudeDir\settings.json"
 
 # Read existing settings.json once, up front.

@@ -77,14 +77,14 @@ function Invoke-QuotaGet {
         if (-not $alreadyFetching) {
             if (-not (Test-Path $script:_QL_Cache -PathType Leaf)) {
                 # First ever call — block briefly so the statusline isn't blank
-                _QL_FetchOnce
+                Invoke-QuotaFetchOnce
             } else {
                 # Stale cache — refresh in background, return previous data this frame
                 $helperPath = "$env:USERPROFILE\.claude\_quota-fetch-helper.ps1"
                 $pwshExe    = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
                 try {
                     $proc = Start-Process $pwshExe `
-                        -ArgumentList "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$helperPath`"" `
+                        -ArgumentList "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$helperPath`"" `
                         -WindowStyle Hidden `
                         -PassThru `
                         -ErrorAction Stop
@@ -93,7 +93,7 @@ function Invoke-QuotaGet {
                     }
                 } catch {
                     # Fall back to synchronous fetch if Start-Process fails
-                    _QL_FetchOnce
+                    Invoke-QuotaFetchOnce
                 }
             }
         }
