@@ -1,4 +1,10 @@
-Read `~/.claude/quota-data.json` and display a clear summary of current Claude API quota status.
+---
+name: quota
+description: Show current Claude quota status (5-hour session and weekly usage) from the local claude-code-quota cache. Use when the user asks about their quota, usage limits, remaining capacity, or when limits reset.
+---
+
+Read `~/.claude/quota-data.json` and display a clear summary of current Claude
+API quota status.
 
 Show:
 - **5-hour session**: % used, resets in (time remaining)
@@ -12,12 +18,29 @@ Keep the output compact — one or two lines is ideal.
 ---
 
 If the file is missing or the data is stale, explain that the statusline script
-populates it automatically. To trigger an immediate fetch manually, run in
-PowerShell:
+populates it automatically. To trigger an immediate fetch manually:
+
+On Windows (PowerShell):
 
 ```powershell
 . "$env:USERPROFILE\.claude\quota-lib.ps1"; Invoke-QuotaGet -Ttl 0
 ```
+
+On Linux / WSL2 (bash):
+
+```bash
+source ~/.claude/quota-lib.sh && quota_get 0
+```
+
+---
+
+If the quota library is not installed at all (`~/.claude/quota-lib.ps1` on
+Windows, `~/.claude/quota-lib.sh` on Linux is missing), the user has the skill
+but not the statusline integration. Offer to set it up: locate the
+claude-code-quota source directory (if installed as a plugin, search under
+`~/.claude/plugins` for a directory containing `install.ps1`; otherwise it is
+the cloned repo) and run `install.ps1` (Windows) or `install.sh` (Linux) from
+there — or follow the manual integration steps in its README.md.
 
 ---
 
@@ -48,4 +71,10 @@ $w = $QuotaResult['weekly_pct'] # "31"  (7-day % used)
 
 Substitute the user's actual `$env:USERPROFILE` value for `<you>` —
 `%USERPROFILE%` is not expanded by bash (which Claude Code uses to run the
-statusline command).
+statusline command). If the statusline outputs non-ASCII glyphs (like `⚠`),
+it must set `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` near
+the top, or captured stdout mangles them to `?`.
+
+On Linux, the equivalent uses `source ~/.claude/quota-lib.sh`, `quota_get $ttl`
+and the `QUOTA_RESULT[]` associative array — see the README of
+claude-code-quota for the full snippet.

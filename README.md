@@ -12,6 +12,21 @@ Sonnet 4.6 | main | ctx:42% | 5h:68% ~1h12m | 7d:31% ~4d2h
 Works on **Windows 11** (PowerShell — no extra dependencies) and
 **Linux / WSL2** (bash + `jq`).  
 
+## Install as a Claude Code plugin
+
+The repo is its own plugin marketplace. Inside Claude Code:
+
+```
+/plugin marketplace add aweussom/claude-code-quota
+/plugin install claude-code-quota@aweussom
+```
+
+This gives you the `/quota` skill immediately. Claude Code plugins cannot
+configure the status line itself (that lives in your own `settings.json`), so
+after installing, ask Claude to *"set up my quota statusline"* — the skill
+walks it through running the installer — or run `install.ps1` / `install.sh`
+yourself as described below.
+
 Based on the work in:
 - https://github.com/jonis100/claude-quota-tracker
 - https://github.com/ryoppippi/ccusage
@@ -58,7 +73,7 @@ The installer:
 1. Detects `pwsh` (7+) or falls back to `powershell.exe` (5.1)
 2. Checks for the Claude OAuth credentials file
 3. Copies `quota-lib.ps1` and `_quota-fetch-helper.ps1` to `%USERPROFILE%\.claude\`
-4. Optionally copies `commands\quota.md` (enables the `/quota` slash command)
+4. Optionally copies `skills\quota\SKILL.md` (enables the `/quota` skill)
 5. If no statusline exists — installs `statusline.ps1.template` as
    `%USERPROFILE%\.claude\statusline.ps1` and offers to write `settings.json`
 6. If an existing statusline is detected — leaves everything unchanged and
@@ -118,16 +133,16 @@ if ($qpct -ne "") {
 }
 ```
 
-#### 3. Enable the `/quota` slash command (optional)
+#### 3. Enable the `/quota` skill (optional)
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\commands" | Out-Null
-Copy-Item commands\quota.md "$env:USERPROFILE\.claude\commands\quota.md"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills\quota" | Out-Null
+Copy-Item skills\quota\SKILL.md "$env:USERPROFILE\.claude\skills\quota\SKILL.md"
 ```
 
 Type `/quota` inside Claude Code for an on-demand quota summary. You can also
 ask Claude "how do I add quota to my statusline?" and it will walk you through
-the integration using the context from this command.
+the integration using the context from this skill.
 
 #### 4. Point Claude Code at your statusline script
 
@@ -198,7 +213,7 @@ The installer:
 
 1. Checks for `jq` and `curl`
 2. Copies `quota-lib.sh` to `~/.claude/`
-3. Optionally copies `commands/quota.md` (enables the `/quota` slash command)
+3. Optionally copies `skills/quota/SKILL.md` (enables the `/quota` skill)
 4. Prints a snippet to add to your existing statusline script
 
 ### Manual integration
@@ -253,11 +268,11 @@ if [[ -n "$_qpct" && "$_qpct" != "null" ]]; then
 fi
 ```
 
-#### 3. Enable the `/quota` slash command (optional)
+#### 3. Enable the `/quota` skill (optional)
 
 ```bash
-mkdir -p ~/.claude/commands
-cp commands/quota.md ~/.claude/commands/quota.md
+mkdir -p ~/.claude/skills/quota
+cp skills/quota/SKILL.md ~/.claude/skills/quota/SKILL.md
 ```
 
 #### 4. Point Claude Code at your statusline script

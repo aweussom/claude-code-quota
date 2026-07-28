@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="${HOME}/.claude"
-COMMANDS_DIR="${CLAUDE_DIR}/commands"
+SKILLS_DIR="${CLAUDE_DIR}/skills/quota"
 YES=false
 
 # ── Args ──────────────────────────────────────────────────────────────────────
@@ -94,22 +94,31 @@ else
     success "Installed ${DEST_LIB}"
 fi
 
-# ── Install /quota slash command ──────────────────────────────────────────────
-header "Installing /quota slash command"
-if confirm "Install the /quota Claude Code slash command?"; then
-    mkdir -p "$COMMANDS_DIR"
-    DEST_CMD="${COMMANDS_DIR}/quota.md"
-    if [[ -f "$DEST_CMD" ]]; then
-        warn "quota.md already exists at ${DEST_CMD}"
+# ── Install /quota skill ──────────────────────────────────────────────────────
+header "Installing /quota skill"
+if confirm "Install the /quota Claude Code skill?"; then
+    mkdir -p "$SKILLS_DIR"
+    DEST_SKILL="${SKILLS_DIR}/SKILL.md"
+    if [[ -f "$DEST_SKILL" ]]; then
+        warn "SKILL.md already exists at ${DEST_SKILL}"
         if confirm "Overwrite it?"; then
-            cp "${SCRIPT_DIR}/commands/quota.md" "$DEST_CMD"
-            success "Replaced ${DEST_CMD}"
+            cp "${SCRIPT_DIR}/skills/quota/SKILL.md" "$DEST_SKILL"
+            success "Replaced ${DEST_SKILL}"
         else
             info "Skipped."
         fi
     else
-        cp "${SCRIPT_DIR}/commands/quota.md" "$DEST_CMD"
-        success "Installed ${DEST_CMD}"
+        cp "${SCRIPT_DIR}/skills/quota/SKILL.md" "$DEST_SKILL"
+        success "Installed ${DEST_SKILL}"
+    fi
+    # Pre-1.0 installs shipped a command file; remove it to avoid a duplicate /quota
+    LEGACY_CMD="${CLAUDE_DIR}/commands/quota.md"
+    if [[ -f "$LEGACY_CMD" ]]; then
+        warn "Legacy /quota command file found at ${LEGACY_CMD}"
+        if confirm "Remove it (superseded by the skill)?"; then
+            rm -f "$LEGACY_CMD"
+            success "Removed ${LEGACY_CMD}"
+        fi
     fi
 fi
 

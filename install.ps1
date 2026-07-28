@@ -25,7 +25,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir  = $PSScriptRoot
 $ClaudeDir  = "$env:USERPROFILE\.claude"
-$CommandsDir = "$ClaudeDir\commands"
+$SkillsDir  = "$ClaudeDir\skills\quota"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,16 +118,25 @@ Copy-FileWithPrompt `
     -Dst "$ClaudeDir\_quota-fetch-helper.ps1" `
     -Label "_quota-fetch-helper.ps1"
 
-# ── Install /quota slash command ──────────────────────────────────────────────
-Write-Hdr "Installing /quota slash command"
-if (Confirm-Step "Install the /quota Claude Code slash command?") {
-    if (-not (Test-Path $CommandsDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $CommandsDir -Force | Out-Null
+# ── Install /quota skill ──────────────────────────────────────────────────────
+Write-Hdr "Installing /quota skill"
+if (Confirm-Step "Install the /quota Claude Code skill?") {
+    if (-not (Test-Path $SkillsDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $SkillsDir -Force | Out-Null
     }
     Copy-FileWithPrompt `
-        -Src "$ScriptDir\commands\quota.md" `
-        -Dst "$CommandsDir\quota.md" `
-        -Label "quota.md"
+        -Src "$ScriptDir\skills\quota\SKILL.md" `
+        -Dst "$SkillsDir\SKILL.md" `
+        -Label "SKILL.md"
+    # Pre-1.0 installs shipped a command file; remove it to avoid a duplicate /quota
+    $legacyCmd = "$ClaudeDir\commands\quota.md"
+    if (Test-Path $legacyCmd -PathType Leaf) {
+        Write-Warn "Legacy /quota command file found at $legacyCmd"
+        if (Confirm-Step "Remove it (superseded by the skill)?") {
+            Remove-Item $legacyCmd -Force
+            Write-Success "Removed $legacyCmd"
+        }
+    }
 }
 
 # ── Statusline + settings.json ────────────────────────────────────────────────
@@ -202,7 +211,7 @@ if ($hasConflictingCmd) {
     `$QuotaResult['weekly_pct']   # "31"  (7-day % used)
     `$QuotaResult['stale']        # "true" / "false"
 
-  Tip: if you installed the /quota slash command, ask Claude:
+  Tip: if you installed the /quota skill, ask Claude:
     /quota  →  then ask "how do I add quota to my statusline?"
 
 "@
