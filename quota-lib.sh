@@ -20,6 +20,7 @@
 #       statusline script and must not alter the parent shell's error behaviour.
 
 # ── Config ────────────────────────────────────────────────────────────────────
+_QL_VERSION="1.0.0"
 _QL_CACHE="${HOME}/.claude/quota-data.json"
 _QL_LOCK="${HOME}/.claude/.quota-fetch.lock"
 _QL_CREDS="${HOME}/.claude/.credentials.json"
@@ -201,8 +202,10 @@ _ql_build_success() {
         --argjson xena_pct   "$xena_pct" \
         --argjson xena_cred  "$xena_cred" \
         --argjson xena_lim   "$xena_lim" \
+        --arg     ver        "$_QL_VERSION" \
         '{
             schema_version:       2,
+            lib_version:          $ver,
             source_url:           $src,
             attempted_at_utc:     $ts,
             fetched_at_utc:       $ts,
@@ -329,8 +332,10 @@ _ql_build_stale() {
         --argjson http_code   "$jq_status_code" \
         --argjson consec      "$consec" \
         --arg     last_suc    "$last_success" \
+        --arg     ver         "$_QL_VERSION" \
         '{
             schema_version:       2,
+            lib_version:          $ver,
             source_url:           $src,
             attempted_at_utc:     $now,
             fetched_at_utc:       $fetched_at,

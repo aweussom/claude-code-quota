@@ -19,6 +19,7 @@
 #       Set-StrictMode or alter error-action preferences at script scope.
 
 # ── Config ────────────────────────────────────────────────────────────────────
+$script:_QL_Version = "1.0.0"
 $script:_QL_Cache   = "$env:USERPROFILE\.claude\quota-data.json"
 $script:_QL_Lock    = "$env:USERPROFILE\.claude\.quota-fetch.lock"
 $script:_QL_Creds   = "$env:USERPROFILE\.claude\.credentials.json"
@@ -219,6 +220,7 @@ function _QL_BuildSuccess {
 
     $payload = [ordered]@{
         schema_version       = 2
+        lib_version          = $script:_QL_Version
         source_url           = $script:_QL_Api
         attempted_at_utc     = $Ts
         fetched_at_utc       = $Ts
@@ -341,6 +343,7 @@ function _QL_BuildStale {
 
     $payload = [ordered]@{
         schema_version       = 2
+        lib_version          = $script:_QL_Version
         source_url           = $sourceUrl
         attempted_at_utc     = $NowUtc
         fetched_at_utc       = $fetchedAt

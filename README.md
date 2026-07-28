@@ -293,6 +293,7 @@ In `~/.claude/settings.json`:
 ```json
 {
   "schema_version": 2,
+  "lib_version": "1.0.0",
   "current_session": { "percent_used": 68, "resets_at": "...", "resets_in": "1 hr 12 min" },
   "weekly_limits":   { "percent_used": 31, "resets_at": "...", "resets_in": "4 d 2 hr 5 min" },
   "extra_usage":     { "is_enabled": null, "utilization": null, "used_credits": null, "monthly_limit": null },

@@ -5,6 +5,7 @@ Show:
 - **Weekly limit**: % used, resets in (time remaining)
 - **Data age**: when was it last successfully fetched
 - **Status**: fresh / stale (with how long it's been stale)
+- **Version**: the `lib_version` field, if present (installed claude-code-quota version)
 
 Keep the output compact — one or two lines is ideal.
 
