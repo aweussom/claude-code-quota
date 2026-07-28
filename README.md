@@ -94,6 +94,15 @@ if (Test-Path $libPath) {
 }
 ```
 
+> **Note:** if your statusline outputs non-ASCII glyphs (like the `⚠` stale
+> marker below), set the output encoding near the top of your script —
+> otherwise PowerShell writes captured stdout in the OEM code page and the
+> glyphs come out as `?`:
+>
+> ```powershell
+> [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+> ```
+
 Then display the values:
 
 ```powershell

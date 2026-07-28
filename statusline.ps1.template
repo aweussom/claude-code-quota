@@ -6,6 +6,11 @@
 #
 # Edit this file freely. Requires quota-lib.ps1 in %USERPROFILE%\.claude\
 
+# ── Output encoding ───────────────────────────────────────────────────────────
+# Claude Code captures stdout through a pipe, where PowerShell defaults to the
+# OEM code page — non-ASCII glyphs like ⚠ get substituted with "?".
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # ── Read session JSON from stdin ──────────────────────────────────────────────
 $sessionRaw = [Console]::In.ReadToEnd()
 if ([string]::IsNullOrWhiteSpace($sessionRaw)) { exit 0 }
