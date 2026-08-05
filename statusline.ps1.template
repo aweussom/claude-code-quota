@@ -91,13 +91,17 @@ if ($ctxPct -ne "") {
 $qpct     = $QuotaResult['pct']
 $resetsIn = $QuotaResult['resets_in']
 $isStale  = $QuotaResult['stale'] -eq 'true'
+$qerr     = $QuotaResult['error']
 if ($qpct -ne "") {
     $n     = [double]$qpct
     $color = if ($n -gt 75) { $cRed } elseif ($n -gt 50) { $cYellow } else { $cGreen }
     $label = "${qpct}%"
-    if ($isStale)  { $label += "⚠" }
+    if ($isStale)  { $label += "⚠" }   # ⚠ = last fetch failed, showing older data (run /quota for details)
     if ($resetsIn) { $label += " ~$resetsIn" }
     $parts.Add("${color}5h:${label}${cReset}")
+} elseif ($qerr -ne "") {
+    # No quota data at all — say why instead of silently showing nothing
+    $parts.Add("${cRed}quota: $qerr${cReset}")
 }
 
 $wpct    = $QuotaResult['weekly_pct']

@@ -49,6 +49,19 @@ The TTL is controlled by the caller:
 - **60 seconds** while an active session is running (transcript recently written)
 - **5 minutes** while idle
 
+### When a fetch fails
+
+Failures are never silent — the reason is written to the cache and exposed to
+your statusline script:
+
+- **Old data still available** → the percentage keeps showing with a `⚠`
+  appended (stale marker). Run `/quota` to see the full error.
+- **No data at all** (first fetch failed, e.g. missing OAuth token) → the
+  `error` result field carries a human-readable reason, and the bundled
+  statusline shows it in red, e.g. `quota: Cannot read OAuth token.`
+- **Unreadable cache file** → `error` says so and suggests deleting
+  `~/.claude/quota-data.json` to reset.
+
 ---
 
 ## Windows 11 / PowerShell
@@ -124,12 +137,16 @@ Then display the values:
 $qpct     = $QuotaResult['pct']       # "68"
 $resetsIn = $QuotaResult['resets_in'] # "1 hr 12 min"
 $isStale  = $QuotaResult['stale'] -eq 'true'
+$qerr     = $QuotaResult['error']     # why the last fetch failed, or ""
 
 if ($qpct -ne "") {
     $display = "${qpct}%"
-    if ($isStale)  { $display += "⚠" }
+    if ($isStale)  { $display += "⚠" }   # last fetch failed; this is older data
     if ($resetsIn) { $display += " ↻$resetsIn" }
     Write-Output "5h:$display"
+} elseif ($qerr -ne "") {
+    # No quota data at all — say why instead of silently showing nothing
+    Write-Output "quota: $qerr"
 }
 ```
 
@@ -173,17 +190,47 @@ Use `powershell` instead of `pwsh` if you only have PowerShell 5.1.
 | `weekly_resets_in` | Time until weekly reset, or `""` |
 | `stale` | `"true"` if the last fetch failed, `"false"` otherwise |
 | `valid` | `"true"` if the last fetch succeeded |
+| `error` | Human-readable reason for the last failure, or `""` |
 
 ### Execution policy
 
-Windows blocks unsigned scripts by default. Run once to allow local scripts:
+Windows blocks unsigned scripts by default. There are two ways past that, and
+they are both listed deliberately — they cover different environments:
 
 ```powershell
+# Standalone / unmanaged Windows: nothing to do. The -ExecutionPolicy Bypass
+# flag already in the settings.json command is sufficient.
+
+# Managed / corporate machine (Entra-joined, GPO/Intune): if Bypass doesn't
+# take effect, set a persistent per-user policy instead (no admin needed):
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-Or keep using `-ExecutionPolicy Bypass` in the `settings.json` command (no
-elevated rights needed, already included in the installer's output).
+Why two paths? `-ExecutionPolicy Bypass` only sets the **Process**-scope
+policy, which sits *below* `MachinePolicy` and `UserPolicy` in PowerShell's
+precedence order. On a machine where group policy or MDM sets an execution
+policy, Bypass is silently overridden, while a `CurrentUser` policy written to
+the registry may still be honored. On an unmanaged machine no such override
+exists and Bypass alone is enough. (This managed-machine explanation is
+inferred from observed behavior on one Entra-joined machine, not confirmed
+against an actual GPO/Intune configuration — see below for how to check yours.)
+
+To see which case applies to your machine:
+
+```powershell
+Get-ExecutionPolicy -List
+```
+
+- If `MachinePolicy` or `UserPolicy` shows anything other than `Undefined`,
+  group policy/Intune is in charge: Bypass will be ignored and the
+  `Set-ExecutionPolicy` route is your only option (and may itself be blocked,
+  depending on how strict the policy is).
+- If both are `Undefined`, Bypass wins over every other scope and the
+  `settings.json` command works as-is — no policy change needed.
+- If both are `Undefined` but scripts *still* refuse to run, check
+  `$ExecutionContext.SessionState.LanguageMode`: `ConstrainedLanguage` means
+  AppLocker/WDAC is restricting PowerShell, which no execution-policy setting
+  can fix.
 
 ### Performance
 
@@ -261,10 +308,13 @@ if [[ -n "$_qpct" && "$_qpct" != "null" ]]; then
     _qstale="${QUOTA_RESULT[stale]:-false}"
     _qresets="${QUOTA_RESULT[resets_in]:-}"
     _qdisplay="${_qpct}%"
-    [[ "$_qstale" == "true" ]] && _qdisplay="${_qdisplay}⚠"
+    [[ "$_qstale" == "true" ]] && _qdisplay="${_qdisplay}⚠"   # last fetch failed; older data
     [[ -n "$_qresets" && "$_qresets" != "null" ]] && _qdisplay="${_qdisplay} ↻${_qresets}"
 
     echo -e "${_qcolor}5h:${_qdisplay}\033[0m"
+elif [[ -n "${QUOTA_RESULT[error]:-}" ]]; then
+    # No quota data at all — say why instead of silently showing nothing
+    echo -e "\033[31mquota: ${QUOTA_RESULT[error]}\033[0m"
 fi
 ```
 
@@ -298,6 +348,7 @@ In `~/.claude/settings.json`:
 | `weekly_resets_in` | Time until weekly reset, or `""` |
 | `stale` | `"true"` if last fetch failed, `"false"` otherwise |
 | `valid` | `"true"` if last fetch succeeded |
+| `error` | Human-readable reason for the last failure, or `""` |
 
 ---
 
@@ -318,9 +369,15 @@ In `~/.claude/settings.json`:
   "weekly_resets":   "4 d 2 hr 5 min",
   "valid": true,
   "stale": false,
+  "error": "",
   "consecutive_failures": 0
 }
 ```
+
+On a failed fetch, `valid` flips to `false`, `stale` to `true`, and `error` /
+`stale_reason` record why (e.g. `"OAuth token rejected (HTTP 401).
+Re-authenticate Claude Code."`) — the previous data is retained so the
+statusline can keep showing the last known values with a stale marker.
 
 Both the PowerShell and bash libraries write the same format, so the cache is
 shared if you use both (e.g. running Claude Code natively on Windows while also

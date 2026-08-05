@@ -12,6 +12,7 @@
 #   weekly_resets_in – human string until weekly reset (or "")
 #   stale            – "true" | "false"
 #   valid            – "true" | "false"
+#   error            – human-readable reason for the last failure (or "")
 #
 # Cache file: ~/.claude/quota-data.json  (written atomically by this library)
 # Lock file:  ~/.claude/.quota-fetch.lock (PID of any in-flight background fetch)
@@ -20,7 +21,7 @@
 #       statusline script and must not alter the parent shell's error behaviour.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_QL_VERSION="1.0.0"
+_QL_VERSION="1.1.0"
 _QL_CACHE="${HOME}/.claude/quota-data.json"
 _QL_LOCK="${HOME}/.claude/.quota-fetch.lock"
 _QL_CREDS="${HOME}/.claude/.credentials.json"
@@ -98,7 +99,13 @@ _ql_fetch_once() {
         prev=$(_ql_read_cache_raw)
         payload=$(_ql_build_stale "$prev" "$now" "Request failed (network error or timeout)." "null")
     elif [[ "$http_code" == "200" ]]; then
-        payload=$(_ql_build_success "$body" "$now")
+        if echo "$body" | jq -e '(.five_hour // .seven_day) != null' >/dev/null 2>&1; then
+            payload=$(_ql_build_success "$body" "$now")
+        else
+            # HTTP 200 but no usage fields — API format changed or body isn't JSON
+            prev=$(_ql_read_cache_raw)
+            payload=$(_ql_build_stale "$prev" "$now" "API response could not be parsed (no usage fields)." "200")
+        fi
     elif [[ "$http_code" == "401" ]]; then
         prev=$(_ql_read_cache_raw)
         payload=$(_ql_build_stale "$prev" "$now" "OAuth token rejected (HTTP 401). Re-authenticate Claude Code." "401")
@@ -371,8 +378,12 @@ _ql_parse_cache() {
         (.current_session.resets_in // .resets_in    // ""),
         (.weekly_limits.resets_in   // .weekly_resets // ""),
         (.stale                     // false | tostring),
-        (.valid                     // false | tostring)
-    ] | join("\t")' "$_QL_CACHE" 2>/dev/null) || return
+        (.valid                     // false | tostring),
+        (.error                     // .stale_reason // "")
+    ] | join("\t")' "$_QL_CACHE" 2>/dev/null) || {
+        QUOTA_RESULT[error]="Cannot parse quota-data.json (delete it to reset)."
+        return
+    }
 
     IFS=$'\t' read -r \
         QUOTA_RESULT[pct] \
@@ -381,5 +392,6 @@ _ql_parse_cache() {
         QUOTA_RESULT[weekly_resets_in] \
         QUOTA_RESULT[stale] \
         QUOTA_RESULT[valid] \
+        QUOTA_RESULT[error] \
         <<< "$fields"
 }
