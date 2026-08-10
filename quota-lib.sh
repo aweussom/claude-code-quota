@@ -13,6 +13,16 @@
 #   stale            – "true" | "false"
 #   valid            – "true" | "false"
 #
+# Model/surface-scoped limits (a separate allowance from the 5h and weekly
+# buckets — e.g. a per-model weekly cap).  Empty when the account has none:
+#   scoped_summary   – "Fable:90% Mythos:12%", or ""
+#   scoped_alert     – "true" if any scoped limit has severity != normal
+#   scoped_worst     – label of the highest scoped limit, or ""
+#   scoped_worst_pct – its percentage, or ""
+#   scoped_worst_resets_in – its countdown, but ONLY when it differs from the
+#                            weekly reset; "" when they coincide (the usual
+#                            case), so callers don't print it twice.
+#
 # Cache file: ~/.claude/quota-data.json  (written atomically by this library)
 # Lock file:  ~/.claude/.quota-fetch.lock (PID of any in-flight background fetch)
 #
@@ -20,13 +30,17 @@
 #       statusline script and must not alter the parent shell's error behaviour.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_QL_VERSION="1.0.0"
+_QL_VERSION="1.1.0"
 _QL_CACHE="${HOME}/.claude/quota-data.json"
 _QL_LOCK="${HOME}/.claude/.quota-fetch.lock"
 _QL_CREDS="${HOME}/.claude/.credentials.json"
 _QL_API="https://api.anthropic.com/api/oauth/usage"
 _QL_BETA="oauth-2025-04-20"
 _QL_TIMEOUT=20
+# A held lock older than this is treated as abandoned.  Needed because PIDs get
+# recycled: without an age bound, a lock whose PID is reused by an unrelated
+# process reads as a live fetch and blocks refreshes indefinitely.
+_QL_LOCK_MAX_AGE=120
 
 declare -gA QUOTA_RESULT
 
@@ -39,36 +53,76 @@ declare -gA QUOTA_RESULT
 quota_get() {
     local ttl="${1:-60}"
 
+    # Taper retries after repeated failures so a failing endpoint isn't hit on
+    # every refresh: 60s, 120s, 240s ... capped at 15 min.  Uses the
+    # consecutive_failures counter already in the cache — no extra state.  The
+    # caller's TTL is a floor, never shortened.
+    local eff_ttl="$ttl"
+    if [[ -f "$_QL_CACHE" ]]; then
+        local fails backoff i
+        fails=$(jq -r '.consecutive_failures // 0' "$_QL_CACHE" 2>/dev/null)
+        [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+        if (( fails > 0 )); then
+            backoff=60
+            for (( i = 1; i < fails && backoff < 900; i++ )); do backoff=$(( backoff * 2 )); done
+            (( backoff > 900 )) && backoff=900
+            (( backoff > eff_ttl )) && eff_ttl="$backoff"
+        fi
+    fi
+
     local needs_refresh=true
     if [[ -f "$_QL_CACHE" ]]; then
         local mtime age
         mtime=$(stat -c %Y "$_QL_CACHE" 2>/dev/null) && {
             age=$(( $(date +%s) - mtime ))
-            (( age < ttl )) && needs_refresh=false
+            (( age < eff_ttl )) && needs_refresh=false
         }
     fi
 
-    if [[ "$needs_refresh" == "true" ]]; then
-        local already_fetching=false
-        if [[ -f "$_QL_LOCK" ]]; then
-            local pid
-            pid=$(cat "$_QL_LOCK" 2>/dev/null)
-            [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && already_fetching=true
-        fi
-
-        if [[ "$already_fetching" == "false" ]]; then
-            if [[ ! -f "$_QL_CACHE" ]]; then
-                # First ever call — block briefly so the statusline isn't blank
-                _ql_fetch_once
-            else
-                # Stale cache — refresh in background, show previous data this frame
-                { _ql_fetch_once; rm -f "$_QL_LOCK"; } &>/dev/null &
-                echo $! > "$_QL_LOCK"
-            fi
+    if [[ "$needs_refresh" == "true" ]] && _ql_try_lock; then
+        if [[ ! -f "$_QL_CACHE" ]]; then
+            # First ever call — block briefly so the statusline isn't blank
+            _ql_fetch_once
+            rm -f "$_QL_LOCK"
+        else
+            # Stale cache — refresh in background, show previous data this frame.
+            # The child restamps the lock with its own PID: this shell exits as
+            # soon as the statusline is drawn, so leaving the parent's PID there
+            # would make the lock look abandoned while the fetch is still running.
+            { printf '%s\n' "$BASHPID" > "$_QL_LOCK"; _ql_fetch_once; rm -f "$_QL_LOCK"; } &>/dev/null &
         fi
     fi
 
     _ql_parse_cache
+}
+
+# ── Internal: fetch lock ──────────────────────────────────────────────────────
+
+# Try to claim the fetch lock.  Returns 0 if we own it, 1 if someone else does.
+#
+# Creation goes through noclobber (O_EXCL) rather than test-then-write: with
+# several sessions refreshing a cold cache, a check-then-write lock lets all of
+# them pass the check and fetch simultaneously.
+_ql_try_lock() {
+    local attempt pid mtime age
+    for attempt in 1 2; do
+        if ( set -o noclobber; printf '%s\n' "$$" > "$_QL_LOCK" ) 2>/dev/null; then
+            return 0
+        fi
+        # Someone holds it.  Steal only if the owner is gone or the lock is old
+        # enough that we no longer trust the PID (see _QL_LOCK_MAX_AGE).
+        pid=$(cat "$_QL_LOCK" 2>/dev/null)
+        if mtime=$(stat -c %Y "$_QL_LOCK" 2>/dev/null); then
+            age=$(( $(date +%s) - mtime ))
+        else
+            age=$(( _QL_LOCK_MAX_AGE + 1 ))
+        fi
+        if (( age <= _QL_LOCK_MAX_AGE )) && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 1        # a live fetch really is in flight
+        fi
+        rm -f "$_QL_LOCK"
+    done
+    return 1
 }
 
 # ── Internal: fetch ───────────────────────────────────────────────────────────
@@ -157,24 +211,96 @@ _ql_time_until() {
     fi
 }
 
+# ── Internal: scoped limits ───────────────────────────────────────────────────
+#
+# The API's limits[] array mixes the account-wide buckets (session, weekly_all —
+# both scope=null) with narrower allowances that apply to one model or surface
+# (scope != null).  Those narrower ones come and go with the plan, so nothing
+# here hardcodes a model name: the label is read from the payload.
+
+# Extract scoped limits from a live API response body.  Rebuilt from scratch on
+# every success, so a bucket the account no longer has stops appearing.
+# resets_in is left empty here — jq can't do date arithmetic; see _ql_scoped_pass.
+_ql_scoped_from_body() {
+    echo "$1" | jq -c '
+        [ (.limits // [])[]
+          | select(.scope != null and .percent != null)
+          | {
+              label:        (.scope.model.display_name // .scope.model.id // .scope.surface // .kind // "scoped"),
+              kind:         (.kind // ""),
+              percent_used: .percent,
+              severity:     (.severity // ""),
+              resets_at:    (.resets_at // ""),
+              resets_in:    "",
+              is_active:    .is_active
+            }
+        ]' 2>/dev/null || echo "[]"
+}
+
+# Refresh each entry's resets_in from its stored resets_at.
+# $2 = "true" to also drop buckets whose window has already rolled over — used on
+# the stale path, where the cached percentage is known wrong and there is no
+# fresh value to replace it with.
+_ql_scoped_pass() {
+    local arr="$1" drop_expired="${2:-false}"
+    local n
+    n=$(echo "$arr" | jq 'length' 2>/dev/null) || { echo "[]"; return; }
+    [[ -z "$n" || "$n" == "0" ]] && { echo "[]"; return; }
+
+    local out="[]" i at r target now entry
+    now=$(date -u +%s)
+    for (( i = 0; i < n; i++ )); do
+        at=$(echo "$arr" | jq -r ".[$i].resets_at // \"\"")
+        r=""
+        if [[ -n "$at" && "$at" != "null" ]]; then
+            target=$(date -d "$at" +%s 2>/dev/null) || target=""
+            if [[ "$drop_expired" == "true" && -n "$target" ]] && (( target <= now )); then
+                continue
+            fi
+            r=$(_ql_time_until "$at")
+        fi
+        entry=$(echo "$arr" | jq -c --arg r "$r" ".[$i] + {resets_in: \$r}") || continue
+        out=$(jq -c -n --argjson acc "$out" --argjson e "$entry" '$acc + [$e]') || continue
+    done
+    printf '%s' "$out"
+}
+
 # Return raw JSON from the cache file, or "null" if absent/corrupt.
 _ql_read_cache_raw() {
     [[ ! -f "$_QL_CACHE" ]] && echo "null" && return
     jq '.' "$_QL_CACHE" 2>/dev/null || echo "null"
 }
 
-# Atomically write the cache file (parent dir created if needed).
+# Write the cache file atomically (parent dir created if needed).
+#
+# Write-then-rename matters here: several Claude Code sessions share one cache,
+# so a plain redirect (truncate, then write) lets a concurrent reader see a
+# half-written file.  A torn read parses as "no cache", which sends that session
+# down the *blocking* fetch path — statusline latency plus a redundant API call.
+# rename(2) within the same directory is atomic, so readers see old or new, never
+# a mixture.
 _ql_write() {
     mkdir -p "$(dirname "$_QL_CACHE")"
-    printf '%s\n' "$1" > "$_QL_CACHE"
+    local tmp
+    if ! tmp=$(mktemp "${_QL_CACHE}.XXXXXX" 2>/dev/null); then
+        printf '%s\n' "$1" > "$_QL_CACHE"   # last resort; better than no cache
+        return
+    fi
+    if printf '%s\n' "$1" > "$tmp"; then
+        mv -f "$tmp" "$_QL_CACHE" || rm -f "$tmp"
+    else
+        rm -f "$tmp"
+    fi
 }
 
 # ── Internal: payload builders ────────────────────────────────────────────────
 
 _ql_build_success() {
     local body="$1" ts="$2"
-    local cur_pct cur_at cur_in weekly_pct weekly_at weekly_in
+    local cur_pct cur_at cur_in weekly_pct weekly_at weekly_in scoped
     local xena_ena xena_pct xena_cred xena_lim
+
+    scoped=$(_ql_scoped_pass "$(_ql_scoped_from_body "$body")" false)
 
     cur_pct=$(_ql_norm_pct "$(echo "$body" | jq -r '.five_hour.utilization // "null"')")
     cur_at=$(echo "$body" | jq -r '.five_hour.resets_at // ""')
@@ -202,15 +328,17 @@ _ql_build_success() {
         --argjson xena_pct   "$xena_pct" \
         --argjson xena_cred  "$xena_cred" \
         --argjson xena_lim   "$xena_lim" \
+        --argjson scoped     "$scoped" \
         --arg     ver        "$_QL_VERSION" \
         '{
-            schema_version:       2,
+            schema_version:       3,
             lib_version:          $ver,
             source_url:           $src,
             attempted_at_utc:     $ts,
             fetched_at_utc:       $ts,
-            current_session:      { percent_used: $cur_pct,    resets_at: $cur_at,    resets_in: $cur_in },
-            weekly_limits:        { percent_used: $weekly_pct, resets_at: $weekly_at, resets_in: $weekly_in },
+            current_session:      { percent_used: $cur_pct,    resets_at: $cur_at,    resets_in: $cur_in,    percent_unknown: false },
+            weekly_limits:        { percent_used: $weekly_pct, resets_at: $weekly_at, resets_in: $weekly_in, percent_unknown: false },
+            scoped_limits:        $scoped,
             extra_usage:          { is_enabled: $xena_ena, utilization: $xena_pct, used_credits: $xena_cred, monthly_limit: $xena_lim },
             quota_used_pct:       $cur_pct,
             weekly_used_pct:      $weekly_pct,
@@ -236,6 +364,14 @@ _ql_build_stale() {
     local xena_ena="null" xena_pct="null" xena_cred="null" xena_lim="null"
     local src="$_QL_API" fetched_at="" last_success=""
     local stale_since="$now_utc" prev_failures=0
+    local scoped="[]"
+    local cur_unknown="false" weekly_unknown="false"
+
+    # Only a *failed* fetch carries scoped limits forward — a successful one is
+    # authoritative, including by omission.
+    if [[ -n "$prev" && "$prev" != "null" ]]; then
+        scoped=$(_ql_scoped_pass "$(echo "$prev" | jq -c '.scoped_limits // []' 2>/dev/null || echo '[]')" true)
+    fi
 
     if [[ -n "$prev" && "$prev" != "null" ]]; then
         local v
@@ -298,12 +434,29 @@ _ql_build_stale() {
         [[ "$v" =~ ^[0-9]+$ ]] && prev_failures="$v"
     fi
 
-    # Recompute resets_in from timestamps (time has passed since last success)
+    # Recompute resets_in from timestamps (time has passed since last success).
+    # If a window has already rolled over we can prove the carried percentage is
+    # obsolete — the usage reset and we never saw the new figure — so drop it
+    # rather than displaying a number we know is wrong.  Callers render "" as
+    # "no data" and omit the segment, which beats a stale reading that looks
+    # authoritative.  Same rule _ql_scoped_pass applies to scoped buckets.
+    local _now r t
+    _now=$(date -u +%s)
     if [[ -n "$cur_at" && "$cur_at" != "null" ]]; then
-        local r; r=$(_ql_time_until "$cur_at"); [[ -n "$r" ]] && cur_in="$r"
+        t=$(date -d "$cur_at" +%s 2>/dev/null) || t=""
+        if [[ -n "$t" ]] && (( t <= _now )); then
+            cur_pct="null"; cur_at=""; cur_in=""; cur_unknown="true"
+        else
+            r=$(_ql_time_until "$cur_at"); [[ -n "$r" ]] && cur_in="$r"
+        fi
     fi
     if [[ -n "$weekly_at" && "$weekly_at" != "null" ]]; then
-        local r; r=$(_ql_time_until "$weekly_at"); [[ -n "$r" ]] && weekly_in="$r"
+        t=$(date -d "$weekly_at" +%s 2>/dev/null) || t=""
+        if [[ -n "$t" ]] && (( t <= _now )); then
+            weekly_pct="null"; weekly_at=""; weekly_in=""; weekly_unknown="true"
+        else
+            r=$(_ql_time_until "$weekly_at"); [[ -n "$r" ]] && weekly_in="$r"
+        fi
     fi
 
     local consec=$(( prev_failures + 1 ))
@@ -331,16 +484,20 @@ _ql_build_stale() {
         --arg     err         "$err_text" \
         --argjson http_code   "$jq_status_code" \
         --argjson consec      "$consec" \
+        --argjson scoped      "$scoped" \
+        --argjson cur_unk     "$cur_unknown" \
+        --argjson weekly_unk  "$weekly_unknown" \
         --arg     last_suc    "$last_success" \
         --arg     ver         "$_QL_VERSION" \
         '{
-            schema_version:       2,
+            schema_version:       3,
             lib_version:          $ver,
             source_url:           $src,
             attempted_at_utc:     $now,
             fetched_at_utc:       $fetched_at,
-            current_session:      { percent_used: $cur_pct,    resets_at: $cur_at,    resets_in: $cur_in },
-            weekly_limits:        { percent_used: $weekly_pct, resets_at: $weekly_at, resets_in: $weekly_in },
+            current_session:      { percent_used: $cur_pct,    resets_at: $cur_at,    resets_in: $cur_in,    percent_unknown: $cur_unk },
+            weekly_limits:        { percent_used: $weekly_pct, resets_at: $weekly_at, resets_in: $weekly_in, percent_unknown: $weekly_unk },
+            scoped_limits:        $scoped,
             extra_usage:          { is_enabled: $xena_ena, utilization: $xena_pct, used_credits: $xena_cred, monthly_limit: $xena_lim },
             quota_used_pct:       $cur_pct,
             weekly_used_pct:      $weekly_pct,
@@ -364,6 +521,11 @@ _ql_parse_cache() {
     QUOTA_RESULT=()
     [[ ! -f "$_QL_CACHE" ]] && return
 
+    # NOTE: the field separator must NOT be IFS whitespace.  With IFS=$'\t',
+    # bash strips leading tabs and collapses runs of them, so a single empty
+    # field shifts every value after it into the wrong variable — a null 5h
+    # percentage used to land the weekly figure in QUOTA_RESULT[pct].  \x1f
+    # (unit separator) is non-whitespace, so empty fields are preserved.
     local fields
     fields=$(jq -r '[
         (.quota_used_pct            // "" | tostring),
@@ -371,15 +533,64 @@ _ql_parse_cache() {
         (.current_session.resets_in // .resets_in    // ""),
         (.weekly_limits.resets_in   // .weekly_resets // ""),
         (.stale                     // false | tostring),
-        (.valid                     // false | tostring)
-    ] | join("\t")' "$_QL_CACHE" 2>/dev/null) || return
+        (.valid                     // false | tostring),
+        (if (.current_session.percent_unknown // false) then "true" else "false" end),
+        (if (.weekly_limits.percent_unknown   // false) then "true" else "false" end)
+    ] | join("")' "$_QL_CACHE" 2>/dev/null) || return
 
-    IFS=$'\t' read -r \
+    IFS=$'\x1f' read -r \
         QUOTA_RESULT[pct] \
         QUOTA_RESULT[weekly_pct] \
         QUOTA_RESULT[resets_in] \
         QUOTA_RESULT[weekly_resets_in] \
         QUOTA_RESULT[stale] \
         QUOTA_RESULT[valid] \
+        QUOTA_RESULT[pct_unknown] \
+        QUOTA_RESULT[weekly_pct_unknown] \
         <<< "$fields"
+
+    _ql_parse_scoped
+}
+
+# Flatten scoped_limits into the display-ready QUOTA_RESULT keys.
+_ql_parse_scoped() {
+    QUOTA_RESULT[scoped_summary]=""
+    QUOTA_RESULT[scoped_alert]="false"
+    QUOTA_RESULT[scoped_worst]=""
+    QUOTA_RESULT[scoped_worst_pct]=""
+    QUOTA_RESULT[scoped_worst_resets_in]=""
+
+    local fields
+    fields=$(jq -r '
+        ((.scoped_limits // []) | map(select(.label != null and .percent_used != null))) as $v
+        | ($v | sort_by(.percent_used) | last) as $w
+        | [ ($v | map("\(.label):\(.percent_used)%") | join(" ")),
+            (if (($v | map(select((.severity // "normal") != "normal")) | length) > 0)
+             then "true" else "false" end),
+            ($w.label // ""),
+            (($w.percent_used // "") | tostring),
+            ($w.resets_at // ""),
+            ($w.resets_in // ""),
+            (.weekly_limits.resets_at // "") ]
+        | join("")' "$_QL_CACHE" 2>/dev/null) || return
+
+    # \x1f, not \t — see the separator note in _ql_parse_cache.
+    local summary alert w_label w_pct w_at w_in weekly_at
+    IFS=$'\x1f' read -r summary alert w_label w_pct w_at w_in weekly_at <<< "$fields"
+
+    QUOTA_RESULT[scoped_summary]="$summary"
+    QUOTA_RESULT[scoped_alert]="${alert:-false}"
+    QUOTA_RESULT[scoped_worst]="$w_label"
+    QUOTA_RESULT[scoped_worst_pct]="$w_pct"
+
+    # Only surface a separate countdown when this bucket resets on a different
+    # boundary than the weekly one — today they coincide, so printing both would
+    # just be noise.  A promotional bucket on its own cadence lights up for free.
+    [[ -z "$w_at" || -z "$weekly_at" ]] && return
+    local a b delta
+    a=$(date -d "$w_at" +%s 2>/dev/null)      || return
+    b=$(date -d "$weekly_at" +%s 2>/dev/null) || return
+    delta=$(( a > b ? a - b : b - a ))
+    (( delta >= 60 )) && QUOTA_RESULT[scoped_worst_resets_in]="$w_in"
+    return 0
 }

@@ -7,6 +7,14 @@ your terminal status line, with no daemon process required.
 Sonnet 4.6 | main | ctx:42% | 5h:68% ~1h12m | 7d:31% ~4d2h
 ```
 
+If your plan includes a model- or surface-scoped limit (a separate allowance
+from the 5h and weekly buckets), it gets its own segment — and only appears
+when you actually have one:
+
+```
+Opus 5 | main | ctx:42% | 5h:60% ~48m | 7d:59% ~1d2h | Fable:90%⚠
+```
+
 ![Windows 11 statusline screenshot](windows11.png)
 
 Works on **Windows 11** (PowerShell — no extra dependencies) and
@@ -48,6 +56,19 @@ On every status line refresh Claude Code emits, the library:
 The TTL is controlled by the caller:
 - **60 seconds** while an active session is running (transcript recently written)
 - **5 minutes** while idle
+
+The caller's TTL is a floor, not the final word. After a failed fetch the library
+tapers its own retries — 60s, 120s, 240s, 480s, capped at 15 minutes — keyed on
+the `consecutive_failures` counter in the cache. Without this, a rate-limited or
+briefly unreachable endpoint gets retried on every refresh, which turns a short
+outage into a long one.
+
+Several Claude Code sessions share one cache file, so both are concurrency-safe:
+the cache is written to a temp file and renamed (readers see the old or new file,
+never a half-written one), and the fetch lock is created with `O_EXCL` /
+`FileMode::CreateNew` so simultaneous sessions can't all launch a fetch at once.
+A lock is treated as abandoned once it exceeds 120 seconds, since PIDs get
+recycled and a reused PID would otherwise look like a fetch in flight forever.
 
 ---
 
@@ -152,7 +173,7 @@ In `%USERPROFILE%\.claude\settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "pwsh -NonInteractive -ExecutionPolicy Bypass -File C:/Users/<you>/.claude/statusline.ps1"
+    "command": "pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:/Users/<you>/.claude/statusline.ps1"
   }
 }
 ```
@@ -173,6 +194,41 @@ Use `powershell` instead of `pwsh` if you only have PowerShell 5.1.
 | `weekly_resets_in` | Time until weekly reset, or `""` |
 | `stale` | `"true"` if the last fetch failed, `"false"` otherwise |
 | `valid` | `"true"` if the last fetch succeeded |
+| `pct_unknown` | `"true"` when the 5h window rolled over while fetches were failing — see below |
+| `weekly_pct_unknown` | Same, for the weekly window |
+| `scoped_summary` | All scoped limits, e.g. `"Fable:90%"`, or `""` |
+| `scoped_alert` | `"true"` if any scoped limit has severity above normal |
+| `scoped_worst` | Label of the highest scoped limit, or `""` |
+| `scoped_worst_pct` | Its percentage, or `""` |
+| `scoped_worst_resets_in` | Its countdown — **only** when it differs from the weekly reset, so you don't print the same time twice |
+
+Scoped limits are read generically from the API's `limits[]` array, keyed on
+`scope.model.display_name`. No model name is hardcoded: if the scoped bucket on
+your plan changes, the label changes with it and no code needs touching. All
+five keys are `""` / `"false"` for accounts with no scoped limits.
+
+#### Unknown vs. missing — show `?`, not a stale number
+
+A cached percentage is trustworthy only until the window it describes resets.
+If fetches are failing when a window rolls over, the library can *prove* the
+figure it holds is obsolete: the usage reset and it never saw the new value. In
+that case it drops the percentage and sets `pct_unknown` (or
+`weekly_pct_unknown`) instead of carrying the old one forward.
+
+Render that as `?`, not as an omitted segment — a missing segment reads as "no
+limit", whereas `?` says "we don't know":
+
+```powershell
+if ($qpct -ne "") {
+    # ... normal render
+} elseif ($QuotaResult['pct_unknown'] -eq 'true') {
+    Write-Output "5h:?⚠"
+}
+```
+
+Buckets are evaluated independently, so a rolled-over 5h window doesn't disturb
+the weekly or scoped figures. Expired scoped buckets are dropped from
+`scoped_limits` under the same rule.
 
 ### Execution policy
 
@@ -298,19 +354,33 @@ In `~/.claude/settings.json`:
 | `weekly_resets_in` | Time until weekly reset, or `""` |
 | `stale` | `"true"` if last fetch failed, `"false"` otherwise |
 | `valid` | `"true"` if last fetch succeeded |
+| `scoped_summary` | All scoped limits, e.g. `"Fable:90%"`, or `""` |
+| `scoped_alert` | `"true"` if any scoped limit has severity above normal |
+| `scoped_worst` | Label of the highest scoped limit, or `""` |
+| `scoped_worst_pct` | Its percentage, or `""` |
+| `scoped_worst_resets_in` | Its countdown — **only** when it differs from the weekly reset |
+| `pct_unknown` | `"true"` when the 5h window rolled over while fetches were failing |
+| `weekly_pct_unknown` | Same, for the weekly window |
+
+See the `$QuotaResult` notes above for how scoped limits are derived and why
+`pct_unknown` should render as `?`.
 
 ---
 
 ## Cache file format
 
-`~/.claude/quota-data.json` (same path on Windows) — schema version 2:
+`~/.claude/quota-data.json` (same path on Windows) — schema version 3:
 
 ```json
 {
-  "schema_version": 2,
-  "lib_version": "1.0.0",
-  "current_session": { "percent_used": 68, "resets_at": "...", "resets_in": "1 hr 12 min" },
-  "weekly_limits":   { "percent_used": 31, "resets_at": "...", "resets_in": "4 d 2 hr 5 min" },
+  "schema_version": 3,
+  "lib_version": "1.1.0",
+  "current_session": { "percent_used": 68, "resets_at": "...", "resets_in": "1 hr 12 min", "percent_unknown": false },
+  "weekly_limits":   { "percent_used": 31, "resets_at": "...", "resets_in": "4 d 2 hr 5 min", "percent_unknown": false },
+  "scoped_limits":   [
+    { "label": "Fable", "kind": "weekly_scoped", "percent_used": 90,
+      "severity": "critical", "resets_at": "...", "resets_in": "1d2h", "is_active": true }
+  ],
   "extra_usage":     { "is_enabled": null, "utilization": null, "used_credits": null, "monthly_limit": null },
   "quota_used_pct":  68,
   "weekly_used_pct": 31,
@@ -322,9 +392,30 @@ In `~/.claude/settings.json`:
 }
 ```
 
+`percent_unknown` marks a bucket whose window rolled over while fetches were
+failing — the stored percentage was dropped rather than shown, because the
+library can prove it describes a spent window. Scoped buckets are removed from
+`scoped_limits` under the same rule.
+
 Both the PowerShell and bash libraries write the same format, so the cache is
 shared if you use both (e.g. running Claude Code natively on Windows while also
 using WSL2).
+
+---
+
+## Tests
+
+`tests/test-quota-lib.sh` covers the bash library: scoped-limit extraction and
+label fallbacks, rollover invalidation, retry tapering, lock mutual exclusion and
+stale-lock recovery, and atomic cache writes under concurrent writers. It uses
+synthetic fixtures shaped like real API responses — no network calls, so it can't
+consume quota or trip rate limits.
+
+```bash
+bash tests/test-quota-lib.sh        # requires jq
+```
+
+Exits `0` on success, `1` on failure, `2` if `jq` is missing.
 
 ## Proof of concept: Chrome/Edge scraper
 

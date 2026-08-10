@@ -98,6 +98,11 @@ if ($qpct -ne "") {
     if ($isStale)  { $label += "⚠" }
     if ($resetsIn) { $label += " ~$resetsIn" }
     $parts.Add("${color}5h:${label}${cReset}")
+} elseif ($QuotaResult['pct_unknown'] -eq 'true') {
+    # The window rolled over while fetches were failing, so the last figure we
+    # hold describes a spent window.  Say we don't know rather than print it —
+    # and don't drop the segment, which would read as "no limit".
+    $parts.Add("${cYellow}5h:?⚠${cReset}")
 }
 
 $wpct    = $QuotaResult['weekly_pct']
@@ -106,6 +111,23 @@ if ($wpct -ne "") {
     $label = "${wpct}%"
     if ($wresets) { $label += " ~$wresets" }
     $parts.Add("7d:$label")
+} elseif ($QuotaResult['weekly_pct_unknown'] -eq 'true') {
+    $parts.Add("${cYellow}7d:?⚠${cReset}")
+}
+
+# Model/surface-scoped limit (e.g. a per-model weekly cap) — a separate
+# allowance from 5h/7d, so it gets its own segment rather than replacing one.
+# Absent for accounts with no scoped limits, so this normally prints nothing.
+$sworst  = $QuotaResult['scoped_worst']
+$spct    = $QuotaResult['scoped_worst_pct']
+$sresets = $QuotaResult['scoped_worst_resets_in']
+if ($sworst -ne "" -and $spct -ne "") {
+    $n     = [double]$spct
+    $color = if ($n -gt 75) { $cRed } elseif ($n -gt 50) { $cYellow } else { $cGreen }
+    $label = "${spct}%"
+    if ($QuotaResult['scoped_alert'] -eq 'true') { $label += "⚠" }
+    if ($sresets) { $label += " ~$sresets" }   # only set when it differs from 7d
+    $parts.Add("${color}${sworst}:${label}${cReset}")
 }
 
 Write-Output ($parts -join " | ")
