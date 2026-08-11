@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+#
+# statusline.sh — Claude Code status line (installed by claude-code-quota)
+#
+# Output example:
+#   Opus 5 | main | ctx:42% | 5h:68% ~1h12m | 7d:31% ~4d2h | Fable:22%
+#
+# Edit this file freely. Requires quota-lib.sh in ~/.claude/ and jq.
+#
+# NOTE: no `set -euo pipefail` here — a statusline must never abort mid-render
+#       and leave the user staring at a blank line.
+
+# ── Read session JSON from stdin ──────────────────────────────────────────────
+input=$(cat)
+[[ -z "${input//[[:space:]]/}" ]] && exit 0
+
+model=$(jq -r '.model // empty'                          <<< "$input" 2>/dev/null)
+cwd=$(jq -r '.cwd // empty'                              <<< "$input" 2>/dev/null)
+ctx_raw=$(jq -r '.context_window.used_percentage // empty' <<< "$input" 2>/dev/null)
+transcript=$(jq -r '.transcript_path // empty'           <<< "$input" 2>/dev/null)
+thinking=$(jq -r '.thinking_budget_tokens // empty'      <<< "$input" 2>/dev/null)
+
+# ── Model + thinking level ────────────────────────────────────────────────────
+# Map model ID → friendly name: claude-sonnet-4-6 → "Sonnet 4.6",
+# claude-opus-5 → "Opus 5".  The minor component is optional because newer IDs
+# omit it, and any trailing date suffix is ignored.
+model_label=""
+if [[ -n "$model" ]]; then
+    if [[ "$model" =~ claude-(opus|sonnet|haiku|fable|mythos)-([0-9]+)(-([0-9]+))? ]]; then
+        fam="${BASH_REMATCH[1]}"
+        model_label="${fam^} ${BASH_REMATCH[2]}"
+        [[ -n "${BASH_REMATCH[4]}" ]] && model_label="${model_label}.${BASH_REMATCH[4]}"
+    else
+        model_label="$model"   # fallback: raw ID
+    fi
+    [[ -n "$thinking" && "$thinking" != "0" ]] && model_label="${model_label} (thinking)"
+fi
+
+# ── Git branch ────────────────────────────────────────────────────────────────
+git_branch=""
+if [[ -n "$cwd" && -d "$cwd" ]]; then
+    git_branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
+fi
+
+# ── Context window ────────────────────────────────────────────────────────────
+ctx_pct=""
+[[ -n "$ctx_raw" ]] && ctx_pct=$(printf '%.0f' "$ctx_raw" 2>/dev/null)
+
+# ── Quota (via quota-lib.sh) ──────────────────────────────────────────────────
+_QL_LIB="${HOME}/.claude/quota-lib.sh"
+if [[ -f "$_QL_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_QL_LIB"
+    # 60 s TTL while a session is active (transcript recently written); 5 min idle
+    _quota_ttl=300
+    if [[ -n "$transcript" && -f "$transcript" ]]; then
+        _t_age=$(( $(date +%s) - $(stat -c %Y "$transcript" 2>/dev/null || echo 0) ))
+        (( _t_age < 300 )) && _quota_ttl=60
+    fi
+    quota_get "$_quota_ttl"
+fi
+
+# ── ANSI colours ──────────────────────────────────────────────────────────────
+if [[ -t 1 || -n "${WT_SESSION:-}${TERM_PROGRAM:-}" || "${TERM:-dumb}" != "dumb" ]]; then
+    cGreen=$'\033[32m'; cYellow=$'\033[33m'; cRed=$'\033[31m'; cReset=$'\033[0m'
+else
+    cGreen=""; cYellow=""; cRed=""; cReset=""
+fi
+
+# ── Assemble parts ────────────────────────────────────────────────────────────
+parts=()
+
+if [[ -n "$model_label" ]]; then
+    label="$model_label"
+    [[ -n "$git_branch" ]] && label="${label} | ${git_branch}"
+    parts+=("$label")
+elif [[ -n "$git_branch" ]]; then
+    parts+=("$git_branch")
+fi
+
+[[ -n "$ctx_pct" ]] && parts+=("ctx:${ctx_pct}%")
+
+qpct="${QUOTA_RESULT[pct]:-}"
+qresets="${QUOTA_RESULT[resets_in]:-}"
+qstale="${QUOTA_RESULT[stale]:-false}"
+qerr="${QUOTA_RESULT[error]:-}"
+if [[ -n "$qpct" && "$qpct" != "null" ]]; then
+    if awk "BEGIN{exit !($qpct + 0 > 75)}" 2>/dev/null;   then color="$cRed"
+    elif awk "BEGIN{exit !($qpct + 0 > 50)}" 2>/dev/null; then color="$cYellow"
+    else color="$cGreen"; fi
+    label="${qpct}%"
+    # ⚠ = last fetch failed, showing older data (run /quota for details)
+    [[ "$qstale" == "true" ]] && label="${label}⚠"
+    [[ -n "$qresets" && "$qresets" != "null" ]] && label="${label} ~${qresets}"
+    parts+=("${color}5h:${label}${cReset}")
+elif [[ "${QUOTA_RESULT[pct_unknown]:-false}" == "true" ]]; then
+    # The window rolled over while fetches were failing, so the last figure we
+    # hold describes a spent window.  Say we don't know rather than print it —
+    # and don't drop the segment, which would read as "no limit".  Checked before
+    # the generic error below: we still know the bucket exists and when it reset,
+    # which is more useful than the fetch error that stopped us updating it.
+    parts+=("${cYellow}5h:?⚠${cReset}")
+elif [[ -n "$qerr" ]]; then
+    # No quota data at all — say why instead of silently showing nothing
+    parts+=("${cRed}quota: ${qerr}${cReset}")
+fi
+
+wpct="${QUOTA_RESULT[weekly_pct]:-}"
+wresets="${QUOTA_RESULT[weekly_resets_in]:-}"
+if [[ -n "$wpct" && "$wpct" != "null" ]]; then
+    label="${wpct}%"
+    [[ -n "$wresets" && "$wresets" != "null" ]] && label="${label} ~${wresets}"
+    parts+=("7d:${label}")
+elif [[ "${QUOTA_RESULT[weekly_pct_unknown]:-false}" == "true" ]]; then
+    parts+=("${cYellow}7d:?⚠${cReset}")
+fi
+
+# Model/surface-scoped limit (e.g. a per-model weekly cap) — a separate
+# allowance from 5h/7d, so it gets its own segment rather than replacing one.
+# Absent for accounts with no scoped limits, so this normally prints nothing.
+sworst="${QUOTA_RESULT[scoped_worst]:-}"
+spct="${QUOTA_RESULT[scoped_worst_pct]:-}"
+sresets="${QUOTA_RESULT[scoped_worst_resets_in]:-}"
+if [[ -n "$sworst" && -n "$spct" ]]; then
+    if awk "BEGIN{exit !($spct + 0 > 75)}" 2>/dev/null;   then color="$cRed"
+    elif awk "BEGIN{exit !($spct + 0 > 50)}" 2>/dev/null; then color="$cYellow"
+    else color="$cGreen"; fi
+    label="${spct}%"
+    [[ "${QUOTA_RESULT[scoped_alert]:-false}" == "true" ]] && label="${label}⚠"
+    # only set when it differs from the 7d boundary
+    [[ -n "$sresets" ]] && label="${label} ~${sresets}"
+    parts+=("${color}${sworst}:${label}${cReset}")
+fi
+
+# ── Emit ──────────────────────────────────────────────────────────────────────
+out=""
+for p in "${parts[@]}"; do
+    [[ -n "$out" ]] && out="${out} | "
+    out="${out}${p}"
+done
+printf '%s\n' "$out"

@@ -126,17 +126,22 @@ fi
 header "Statusline integration"
 
 SETTINGS="${CLAUDE_DIR}/settings.json"
+DEST_STATUSLINE="${CLAUDE_DIR}/statusline.sh"
+
+existing_statusline=""
 if [[ -f "$SETTINGS" ]]; then
-    current_statusline=$(jq -r '.statusLine // empty' "$SETTINGS" 2>/dev/null)
-    if [[ -n "$current_statusline" ]]; then
-        info "Detected existing statusLine config in settings.json."
-    fi
+    existing_statusline=$(jq -r '.statusLine.command // empty' "$SETTINGS" 2>/dev/null)
 fi
 
-cat <<'SNIPPET'
+if [[ -n "$existing_statusline" || -f "$DEST_STATUSLINE" ]]; then
+    # Someone already has a statusline — don't touch it, just say how to add quota.
+    [[ -n "$existing_statusline" ]] && info "Detected existing statusLine: ${existing_statusline}"
+    [[ -f "$DEST_STATUSLINE" ]]    && info "Detected existing ${DEST_STATUSLINE}"
+    info "Leaving it unchanged."
+    cat <<'SNIPPET'
 
-  Add this block near the top of your ~/.claude/statusline.sh (before building
-  display components), to source quota-lib.sh and call quota_get:
+  To add quota to your own statusline, source the library near the top (before
+  you build the display) and call quota_get:
 
   ────────────────────────────────────────────────────────────────────────────
   _QL_LIB="${HOME}/.claude/quota-lib.sh"
@@ -152,30 +157,50 @@ cat <<'SNIPPET'
   fi
   ────────────────────────────────────────────────────────────────────────────
 
-  Then display quota values:
-
-  ────────────────────────────────────────────────────────────────────────────
-  _qpct="${QUOTA_RESULT[pct]:-}"
-  if [[ -n "$_qpct" && "$_qpct" != "null" ]]; then
-      if awk "BEGIN{exit !($_qpct + 0 > 75)}" 2>/dev/null; then
-          _qcolor='\033[31m'
-      elif awk "BEGIN{exit !($_qpct + 0 > 50)}" 2>/dev/null; then
-          _qcolor='\033[33m'
-      else
-          _qcolor='\033[32m'
-      fi
-      _qstale="${QUOTA_RESULT[stale]:-false}"
-      _qresets="${QUOTA_RESULT[resets_in]:-}"
-      _qdisplay="${_qpct}%"
-      [[ "$_qstale" == "true" ]] && _qdisplay="${_qdisplay}⚠"
-      [[ -n "$_qresets" && "$_qresets" != "null" ]] && _qdisplay="${_qdisplay} ↻${_qresets}"
-      echo -e "${_qcolor}5h:${_qdisplay}\033[0m"
-  fi
-  ────────────────────────────────────────────────────────────────────────────
-
-  See README.md for the full QUOTA_RESULT[] key reference.
+  Then read QUOTA_RESULT[] — see statusline.sh.template in this repo for a
+  complete renderer (5h, 7d, scoped limits, unknown-after-rollover, and errors),
+  and README.md for the full key reference.
 
 SNIPPET
+else
+    # No statusline at all — install the bundled one and offer to wire it up.
+    if confirm "No statusline found. Install the bundled statusline.sh?"; then
+        cp "${SCRIPT_DIR}/statusline.sh.template" "$DEST_STATUSLINE"
+        chmod +x "$DEST_STATUSLINE"
+        success "Installed ${DEST_STATUSLINE}"
+
+        if confirm "Point Claude Code at it by writing settings.json?"; then
+            mkdir -p "$CLAUDE_DIR"
+            if [[ -f "$SETTINGS" ]]; then
+                cp "$SETTINGS" "${SETTINGS}.bak"
+                info "Backed up existing settings to ${SETTINGS}.bak"
+                tmp=$(mktemp)
+                if jq --arg cmd "$DEST_STATUSLINE" \
+                      '.statusLine = {"type":"command","command":$cmd}' \
+                      "$SETTINGS" > "$tmp" 2>/dev/null; then
+                    mv "$tmp" "$SETTINGS"
+                    success "Added statusLine to ${SETTINGS}"
+                else
+                    rm -f "$tmp"
+                    warn "Could not update ${SETTINGS} — is it valid JSON?"
+                    info "Add this manually:"
+                    info '  "statusLine": { "type": "command", "command": "'"${DEST_STATUSLINE}"'" }'
+                fi
+            else
+                jq -n --arg cmd "$DEST_STATUSLINE" \
+                   '{statusLine: {type: "command", command: $cmd}}' > "$SETTINGS"
+                success "Created ${SETTINGS} with statusLine"
+            fi
+            info "Restart Claude Code (or open a new session) to see it."
+        else
+            info "Skipped. Add this to ${SETTINGS} when you're ready:"
+            info '  "statusLine": { "type": "command", "command": "'"${DEST_STATUSLINE}"'" }'
+        fi
+    else
+        info "Skipped. statusline.sh.template in this repo is a complete renderer"
+        info "if you want to adapt it later."
+    fi
+fi
 
 # ── Test fetch ────────────────────────────────────────────────────────────────
 header "Testing"
