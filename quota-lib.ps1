@@ -13,6 +13,16 @@
 #   valid            – "true" | "false"
 #   error            – human-readable reason for the last failure (or "")
 #
+# Model/surface-scoped limits (a separate allowance from the 5h and weekly
+# buckets — e.g. a per-model weekly cap).  Empty when the account has none:
+#   scoped_summary   – "Fable:89% Mythos:12%", or ""
+#   scoped_alert     – "true" if any scoped limit has severity != normal
+#   scoped_worst     – label of the highest scoped limit, or ""
+#   scoped_worst_pct – its percentage, or ""
+#   scoped_worst_resets_in – its countdown, but ONLY when it differs from the
+#                            weekly reset; "" when they coincide (the usual
+#                            case), so callers don't print it twice.
+#
 # Cache file: $env:USERPROFILE\.claude\quota-data.json
 # Lock file:  $env:USERPROFILE\.claude\.quota-fetch.lock
 #
@@ -20,23 +30,34 @@
 #       Set-StrictMode or alter error-action preferences at script scope.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-$script:_QL_Version = "1.1.0"
+$script:_QL_Version = "1.2.0"
 $script:_QL_Cache   = "$env:USERPROFILE\.claude\quota-data.json"
 $script:_QL_Lock    = "$env:USERPROFILE\.claude\.quota-fetch.lock"
 $script:_QL_Creds   = "$env:USERPROFILE\.claude\.credentials.json"
 $script:_QL_Api     = "https://api.anthropic.com/api/oauth/usage"
 $script:_QL_Beta    = "oauth-2025-04-20"
 $script:_QL_Timeout = 20
+# A held lock older than this is treated as abandoned.  Needed because PIDs get
+# recycled: without an age bound, a lock whose PID is reused by an unrelated
+# process reads as a live fetch and blocks refreshes indefinitely.
+$script:_QL_LockMaxAge = 120
 
 # Populated by Invoke-QuotaGet; readable after dot-sourcing.
 $script:QuotaResult = @{
-    pct              = ""
-    weekly_pct       = ""
-    resets_in        = ""
-    weekly_resets_in = ""
-    stale            = "false"
-    valid            = "false"
-    error            = ""
+    pct                    = ""
+    weekly_pct             = ""
+    resets_in              = ""
+    weekly_resets_in       = ""
+    stale                  = "false"
+    valid                  = "false"
+    error                  = ""
+    pct_unknown            = "false"
+    weekly_pct_unknown     = "false"
+    scoped_summary         = ""
+    scoped_alert           = "false"
+    scoped_worst           = ""
+    scoped_worst_pct       = ""
+    scoped_worst_resets_in = ""
 }
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -57,52 +78,111 @@ Cache TTL in seconds.  Default: 60.
 function Invoke-QuotaGet {
     param([int]$Ttl = 60)
 
+    # Taper retries after repeated failures so a failing endpoint isn't hit on
+    # every refresh: 60s, 120s, 240s ... capped at 15 min.  Uses the
+    # consecutive_failures counter already in the cache — no extra state.  The
+    # caller's TTL is a floor, never shortened.
+    $effTtl = $Ttl
+    $prevForBackoff = _QL_ReadCacheRaw
+    if ($null -ne $prevForBackoff) {
+        $fails = 0
+        try { $fails = [int](_QL_GetObjectValue $prevForBackoff @("consecutive_failures")) } catch {}
+        if ($fails -gt 0) {
+            $backoff = 60
+            for ($i = 1; $i -lt $fails -and $backoff -lt 900; $i++) { $backoff *= 2 }
+            if ($backoff -gt 900) { $backoff = 900 }
+            if ($backoff -gt $effTtl) { $effTtl = $backoff }
+        }
+    }
+
     $needsRefresh = $true
     if (Test-Path $script:_QL_Cache -PathType Leaf) {
         try {
             $mtime = (Get-Item $script:_QL_Cache -ErrorAction Stop).LastWriteTimeUtc
             $age   = ([DateTimeOffset]::UtcNow - $mtime).TotalSeconds
-            if ($age -lt $Ttl) { $needsRefresh = $false }
+            if ($age -lt $effTtl) { $needsRefresh = $false }
         } catch {}
     }
 
-    if ($needsRefresh) {
-        $alreadyFetching = $false
-        if (Test-Path $script:_QL_Lock -PathType Leaf) {
+    if ($needsRefresh -and (_QL_TryLock)) {
+        if (-not (Test-Path $script:_QL_Cache -PathType Leaf)) {
+            # First ever call — block briefly so the statusline isn't blank
+            try { Invoke-QuotaFetchOnce } finally { _QL_ReleaseLock }
+        } else {
+            # Stale cache — refresh in background, return previous data this frame
+            $helperPath = "$env:USERPROFILE\.claude\_quota-fetch-helper.ps1"
+            $pwshExe    = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
             try {
-                $lockPid = [int](Get-Content $script:_QL_Lock -ErrorAction Stop)
-                if ($null -ne (Get-Process -Id $lockPid -ErrorAction SilentlyContinue)) {
-                    $alreadyFetching = $true
+                $proc = Start-Process $pwshExe `
+                    -ArgumentList "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$helperPath`"" `
+                    -WindowStyle Hidden `
+                    -PassThru `
+                    -ErrorAction Stop
+                if ($null -ne $proc) {
+                    # Hand ownership to the helper: this process exits as soon as
+                    # the statusline is drawn, so leaving our PID in the lock would
+                    # make it look abandoned while the fetch is still running.
+                    [string]$proc.Id | Set-Content -Path $script:_QL_Lock -Encoding UTF8
+                } else {
+                    _QL_ReleaseLock
                 }
-            } catch {}
-        }
-
-        if (-not $alreadyFetching) {
-            if (-not (Test-Path $script:_QL_Cache -PathType Leaf)) {
-                # First ever call — block briefly so the statusline isn't blank
-                Invoke-QuotaFetchOnce
-            } else {
-                # Stale cache — refresh in background, return previous data this frame
-                $helperPath = "$env:USERPROFILE\.claude\_quota-fetch-helper.ps1"
-                $pwshExe    = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
-                try {
-                    $proc = Start-Process $pwshExe `
-                        -ArgumentList "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$helperPath`"" `
-                        -WindowStyle Hidden `
-                        -PassThru `
-                        -ErrorAction Stop
-                    if ($null -ne $proc) {
-                        [string]$proc.Id | Set-Content -Path $script:_QL_Lock -Encoding UTF8
-                    }
-                } catch {
-                    # Fall back to synchronous fetch if Start-Process fails
-                    Invoke-QuotaFetchOnce
-                }
+            } catch {
+                # Fall back to synchronous fetch if Start-Process fails
+                try { Invoke-QuotaFetchOnce } finally { _QL_ReleaseLock }
             }
         }
     }
 
     _QL_ParseCache
+}
+
+# ── Internal: fetch lock ──────────────────────────────────────────────────────
+
+<#
+.SYNOPSIS
+Tries to claim the fetch lock.  Returns $true if this process owns it.
+
+.DESCRIPTION
+Creation uses FileMode::CreateNew rather than Test-Path-then-write: with several
+Claude Code sessions refreshing a cold cache, a check-then-write lock lets all of
+them pass the check and fetch simultaneously.
+#>
+function _QL_TryLock {
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        try {
+            $fs = [System.IO.File]::Open(
+                      $script:_QL_Lock,
+                      [System.IO.FileMode]::CreateNew,
+                      [System.IO.FileAccess]::Write,
+                      [System.IO.FileShare]::None)
+            try {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes("$PID`n")
+                $fs.Write($bytes, 0, $bytes.Length)
+            } finally { $fs.Dispose() }
+            return $true
+        } catch {}
+
+        # Someone holds it.  Steal only if the owner is gone or the lock is old
+        # enough that we no longer trust the PID (see $_QL_LockMaxAge).
+        $ownerAlive = $false
+        try {
+            $age = ([DateTimeOffset]::UtcNow -
+                    (Get-Item $script:_QL_Lock -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds
+            if ($age -le $script:_QL_LockMaxAge) {
+                $lockPid = [int]((Get-Content $script:_QL_Lock -Raw -ErrorAction Stop).Trim())
+                if ($null -ne (Get-Process -Id $lockPid -ErrorAction SilentlyContinue)) {
+                    $ownerAlive = $true
+                }
+            }
+        } catch {}
+        if ($ownerAlive) { return $false }   # a live fetch really is in flight
+        Remove-Item $script:_QL_Lock -Force -ErrorAction SilentlyContinue
+    }
+    return $false
+}
+
+function _QL_ReleaseLock {
+    Remove-Item $script:_QL_Lock -Force -ErrorAction SilentlyContinue
 }
 
 # ── Internal: timestamp ───────────────────────────────────────────────────────
@@ -185,6 +265,108 @@ function _QL_GetObjectValue {
     return $current
 }
 
+# ── Internal: scoped limits ───────────────────────────────────────────────────
+#
+# The API's limits[] array mixes the account-wide buckets (session, weekly_all —
+# both scope=null) with narrower allowances that apply to one model or surface
+# (scope != null).  Those narrower ones come and go with the plan, so nothing
+# here hardcodes a model name: the label is read from the payload.
+
+# True when an ISO 8601 timestamp is in the past (or unparseable).
+function _QL_IsPast {
+    param([AllowNull()][string]$IsoTimestamp)
+    if ([string]::IsNullOrWhiteSpace($IsoTimestamp)) { return $false }
+    try {
+        $t = [DateTimeOffset]::Parse(
+                 $IsoTimestamp,
+                 [System.Globalization.CultureInfo]::InvariantCulture,
+                 [System.Globalization.DateTimeStyles]::RoundtripKind
+             ).UtcDateTime
+    } catch { return $false }
+    return ($t -le (Get-Date).ToUniversalTime())
+}
+
+# Human label for a scoped limit.  display_name is the only field populated
+# today (model.id is null), so fall back through everything else we might get.
+function _QL_ScopeLabel {
+    param($Scope, [AllowNull()][string]$Kind)
+    if ($null -ne $Scope) {
+        foreach ($path in @(@("model", "display_name"), @("model", "id"), @("surface"))) {
+            $v = _QL_GetObjectValue $Scope $path
+            if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return [string]$v }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Kind)) { return $Kind }
+    return "scoped"
+}
+
+# Extract scoped limits from a live API response.  Rebuilt from scratch on every
+# success, so a bucket the account no longer has simply stops appearing.
+function _QL_BuildScopedLimits {
+    param($UsageData)
+
+    $out = @()
+    $limits = _QL_GetObjectValue $UsageData @("limits")
+    if ($null -eq $limits) { return , [array]$out }
+
+    foreach ($entry in @($limits)) {
+        if ($null -eq $entry) { continue }
+
+        # scope == null marks the account-wide buckets, already reported as
+        # current_session / weekly_limits.
+        $scope = _QL_GetObjectValue $entry @("scope")
+        if ($null -eq $scope) { continue }
+
+        $pct = _QL_NormalizePercent (_QL_GetObjectValue $entry @("percent"))
+        if ($null -eq $pct) { continue }
+
+        $at = _QL_DateToIso (_QL_GetObjectValue $entry @("resets_at"))
+        $out += [ordered]@{
+            label        = _QL_ScopeLabel $scope ([string](_QL_GetObjectValue $entry @("kind")))
+            kind         = [string](_QL_GetObjectValue $entry @("kind"))
+            percent_used = $pct
+            severity     = [string](_QL_GetObjectValue $entry @("severity"))
+            resets_at    = $at
+            resets_in    = if (-not [string]::IsNullOrWhiteSpace($at)) { _QL_GetTimeUntil $at } else { "" }
+            is_active    = _QL_GetObjectValue $entry @("is_active")
+        }
+    }
+    return , [array]$out
+}
+
+# Carry scoped limits across a failed fetch.  Only a *failed* fetch preserves
+# them — a successful one is authoritative, including by omission.  Buckets whose
+# window has already rolled over are dropped: the cached percentage is known
+# wrong and there's no fresh value to replace it with.
+function _QL_CarryScopedLimits {
+    param($Previous)
+
+    $out = @()
+    $prev = _QL_GetObjectValue $Previous @("scoped_limits")
+    if ($null -eq $prev) { return , [array]$out }
+
+    foreach ($entry in @($prev)) {
+        if ($null -eq $entry) { continue }
+
+        $at = [string](_QL_GetObjectValue $entry @("resets_at"))
+        if (_QL_IsPast $at) { continue }
+
+        $pct = _QL_NormalizePercent (_QL_GetObjectValue $entry @("percent_used"))
+        if ($null -eq $pct) { continue }
+
+        $out += [ordered]@{
+            label        = [string](_QL_GetObjectValue $entry @("label"))
+            kind         = [string](_QL_GetObjectValue $entry @("kind"))
+            percent_used = $pct
+            severity     = [string](_QL_GetObjectValue $entry @("severity"))
+            resets_at    = $at
+            resets_in    = if (-not [string]::IsNullOrWhiteSpace($at)) { _QL_GetTimeUntil $at } else { "" }
+            is_active    = _QL_GetObjectValue $entry @("is_active")
+        }
+    }
+    return , [array]$out
+}
+
 # ── Internal: cache I/O ───────────────────────────────────────────────────────
 
 function _QL_ReadCacheRaw {
@@ -194,13 +376,27 @@ function _QL_ReadCacheRaw {
     } catch { return $null }
 }
 
+# Write the cache file atomically (parent dir created if needed).
+#
+# Write-then-rename matters here: several Claude Code sessions share one cache,
+# so writing in place lets a concurrent reader see a half-written file.  A torn
+# read parses as "no cache", which sends that session down the *blocking* fetch
+# path — statusline latency plus a redundant API call.
 function _QL_Write {
     param([string]$Json)
     $dir = Split-Path $script:_QL_Cache -Parent
     if (-not (Test-Path $dir -PathType Container)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $Json | Set-Content -Path $script:_QL_Cache -Encoding UTF8
+    $tmp = "$($script:_QL_Cache).$PID.tmp"
+    try {
+        $Json | Set-Content -Path $tmp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmp -Destination $script:_QL_Cache -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        # Fall back to an in-place write rather than leaving no cache at all.
+        try { $Json | Set-Content -Path $script:_QL_Cache -Encoding UTF8 } catch {}
+    }
 }
 
 # ── Internal: payload builders ────────────────────────────────────────────────
@@ -221,13 +417,14 @@ function _QL_BuildSuccess {
     $weeklyIn  = if (-not [string]::IsNullOrWhiteSpace($weeklyAt)) { _QL_GetTimeUntil $weeklyAt } else { "" }
 
     $payload = [ordered]@{
-        schema_version       = 2
+        schema_version       = 3
         lib_version          = $script:_QL_Version
         source_url           = $script:_QL_Api
         attempted_at_utc     = $Ts
         fetched_at_utc       = $Ts
-        current_session      = [ordered]@{ percent_used = $curPct;    resets_at = $curAt;    resets_in = $curIn    }
-        weekly_limits        = [ordered]@{ percent_used = $weeklyPct; resets_at = $weeklyAt; resets_in = $weeklyIn }
+        current_session      = [ordered]@{ percent_used = $curPct;    resets_at = $curAt;    resets_in = $curIn;    percent_unknown = $false }
+        weekly_limits        = [ordered]@{ percent_used = $weeklyPct; resets_at = $weeklyAt; resets_in = $weeklyIn; percent_unknown = $false }
+        scoped_limits        = _QL_BuildScopedLimits $UsageData
         extra_usage          = [ordered]@{
             is_enabled    = if ($null -ne $extra) { $extra.is_enabled    } else { $null }
             utilization   = if ($null -ne $extra) { _QL_NormalizePercent $extra.utilization } else { $null }
@@ -333,24 +530,40 @@ function _QL_BuildStale {
         if ($null -ne $v) { try { $prevFailures = [int]$v } catch {} }
     }
 
-    # Recompute resets_in from stored timestamps (time has passed since last success)
+    # Recompute resets_in from stored timestamps (time has passed since last
+    # success).  If a window has already rolled over we can prove the carried
+    # percentage is obsolete — the usage reset and we never saw the new figure —
+    # so drop it rather than displaying a number we know is wrong.  Callers
+    # render "" as "no data" and omit the segment, which beats a stale reading
+    # that looks authoritative.  Same rule _QL_CarryScopedLimits applies.
+    $curUnknown    = $false
+    $weeklyUnknown = $false
     if (-not [string]::IsNullOrWhiteSpace($curAt)) {
-        $r = _QL_GetTimeUntil $curAt
-        if (-not [string]::IsNullOrWhiteSpace($r)) { $curIn = $r }
+        if (_QL_IsPast $curAt) {
+            $curPct = $null; $curAt = ""; $curIn = ""; $curUnknown = $true
+        } else {
+            $r = _QL_GetTimeUntil $curAt
+            if (-not [string]::IsNullOrWhiteSpace($r)) { $curIn = $r }
+        }
     }
     if (-not [string]::IsNullOrWhiteSpace($weeklyAt)) {
-        $r = _QL_GetTimeUntil $weeklyAt
-        if (-not [string]::IsNullOrWhiteSpace($r)) { $weeklyIn = $r }
+        if (_QL_IsPast $weeklyAt) {
+            $weeklyPct = $null; $weeklyAt = ""; $weeklyIn = ""; $weeklyUnknown = $true
+        } else {
+            $r = _QL_GetTimeUntil $weeklyAt
+            if (-not [string]::IsNullOrWhiteSpace($r)) { $weeklyIn = $r }
+        }
     }
 
     $payload = [ordered]@{
-        schema_version       = 2
+        schema_version       = 3
         lib_version          = $script:_QL_Version
         source_url           = $sourceUrl
         attempted_at_utc     = $NowUtc
         fetched_at_utc       = $fetchedAt
-        current_session      = [ordered]@{ percent_used = $curPct;    resets_at = $curAt;    resets_in = $curIn    }
-        weekly_limits        = [ordered]@{ percent_used = $weeklyPct; resets_at = $weeklyAt; resets_in = $weeklyIn }
+        current_session      = [ordered]@{ percent_used = $curPct;    resets_at = $curAt;    resets_in = $curIn;    percent_unknown = $curUnknown    }
+        weekly_limits        = [ordered]@{ percent_used = $weeklyPct; resets_at = $weeklyAt; resets_in = $weeklyIn; percent_unknown = $weeklyUnknown }
+        scoped_limits        = _QL_CarryScopedLimits $Previous
         extra_usage          = [ordered]@{
             is_enabled    = $extraIsEnabled
             utilization   = $extraUtil
@@ -436,13 +649,20 @@ function Invoke-QuotaFetchOnce {
 
 function _QL_ParseCache {
     $script:QuotaResult = @{
-        pct              = ""
-        weekly_pct       = ""
-        resets_in        = ""
-        weekly_resets_in = ""
-        stale            = "false"
-        valid            = "false"
-        error            = ""
+        pct                    = ""
+        weekly_pct             = ""
+        resets_in              = ""
+        weekly_resets_in       = ""
+        stale                  = "false"
+        valid                  = "false"
+        error                  = ""
+        pct_unknown            = "false"
+        weekly_pct_unknown     = "false"
+        scoped_summary         = ""
+        scoped_alert           = "false"
+        scoped_worst           = ""
+        scoped_worst_pct       = ""
+        scoped_worst_resets_in = ""
     }
 
     if (-not (Test-Path $script:_QL_Cache -PathType Leaf)) { return }
@@ -477,4 +697,74 @@ function _QL_ParseCache {
     $v = _QL_GetObjectValue $data @("error")
     if ([string]::IsNullOrWhiteSpace([string]$v)) { $v = _QL_GetObjectValue $data @("stale_reason") }
     if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $script:QuotaResult['error'] = [string]$v }
+
+    # "We know this bucket exists but not its current value" — distinct from
+    # "no data at all".  Callers should render "?" rather than omitting the
+    # segment, so a rolled-over window doesn't read as "no limit".
+    if ((_QL_GetObjectValue $data @("current_session", "percent_unknown")) -eq $true) {
+        $script:QuotaResult['pct_unknown'] = "true"
+    }
+    if ((_QL_GetObjectValue $data @("weekly_limits", "percent_unknown")) -eq $true) {
+        $script:QuotaResult['weekly_pct_unknown'] = "true"
+    }
+
+    _QL_ParseScopedLimits $data
+}
+
+# Flatten scoped_limits into the display-ready $QuotaResult keys.
+function _QL_ParseScopedLimits {
+    param($Data)
+
+    $scoped = _QL_GetObjectValue $Data @("scoped_limits")
+    if ($null -eq $scoped) { return }
+
+    $weeklyAt = [string](_QL_GetObjectValue $Data @("weekly_limits", "resets_at"))
+    $parts    = @()
+    $worst    = $null
+    $worstPct = -1
+    $alert    = $false
+
+    foreach ($entry in @($scoped)) {
+        if ($null -eq $entry) { continue }
+        $label = [string](_QL_GetObjectValue $entry @("label"))
+        $pct   = _QL_NormalizePercent (_QL_GetObjectValue $entry @("percent_used"))
+        if ([string]::IsNullOrWhiteSpace($label) -or $null -eq $pct) { continue }
+
+        $parts += "${label}:${pct}%"
+
+        $sev = [string](_QL_GetObjectValue $entry @("severity"))
+        if (-not [string]::IsNullOrWhiteSpace($sev) -and $sev -ne "normal") { $alert = $true }
+
+        if ([double]$pct -gt $worstPct) { $worstPct = [double]$pct; $worst = $entry }
+    }
+
+    if ($parts.Count -gt 0) { $script:QuotaResult['scoped_summary'] = ($parts -join " ") }
+    if ($alert)             { $script:QuotaResult['scoped_alert']   = "true" }
+    if ($null -eq $worst)   { return }
+
+    $script:QuotaResult['scoped_worst']     = [string](_QL_GetObjectValue $worst @("label"))
+    $script:QuotaResult['scoped_worst_pct'] = [string](_QL_NormalizePercent (_QL_GetObjectValue $worst @("percent_used")))
+
+    # Only surface a separate countdown when this bucket resets on a different
+    # boundary than the weekly one — today they coincide, so printing both would
+    # just be noise.  A promotional bucket on its own cadence lights up for free.
+    $at = [string](_QL_GetObjectValue $worst @("resets_at"))
+    if ([string]::IsNullOrWhiteSpace($at)) { return }
+    if (-not (_QL_SameInstant $at $weeklyAt)) {
+        $script:QuotaResult['scoped_worst_resets_in'] = [string](_QL_GetObjectValue $worst @("resets_in"))
+    }
+}
+
+# Two ISO timestamps within a minute of each other — close enough that they're
+# the same reset boundary (the API's differ by microseconds).
+function _QL_SameInstant {
+    param([AllowNull()][string]$A, [AllowNull()][string]$B)
+    if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
+    try {
+        $styles = [System.Globalization.DateTimeStyles]::RoundtripKind
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+        $ta = [DateTimeOffset]::Parse($A, $culture, $styles).UtcDateTime
+        $tb = [DateTimeOffset]::Parse($B, $culture, $styles).UtcDateTime
+    } catch { return $false }
+    return ([Math]::Abs(($ta - $tb).TotalSeconds) -lt 60)
 }

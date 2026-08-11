@@ -9,6 +9,12 @@ API quota status.
 Show:
 - **5-hour session**: % used, resets in (time remaining)
 - **Weekly limit**: % used, resets in (time remaining)
+- **Scoped limits**: every entry in `scoped_limits` (if the array is present and
+  non-empty) as `label: % used`, plus its `resets_at`. These are *separate*
+  allowances from the 5h and weekly buckets — a scoped limit at 90% does not
+  mean the weekly limit is at 90%, and hitting it restricts only that model or
+  surface. Call out any entry whose `severity` is above `normal`. Omit the
+  section entirely when the array is absent or empty.
 - **Data age**: when was it last successfully fetched
 - **Status**: fresh / stale (with how long it's been stale)
 - **Error**: if `stale` or not `valid`, always show the `error` (or
@@ -16,6 +22,10 @@ Show:
   OAuth token, network error, rate limit) and is the answer to "what does the
   ⚠ in my statusline mean?"
 - **Version**: the `lib_version` field, if present (installed claude-code-quota version)
+
+If `scoped_limits` is missing while the rest of the data is present, the cache
+was written from a source that cannot see scoped limits — check `source_url`
+and say so rather than reporting "no scoped limits".
 
 Keep the output compact — one or two lines is ideal.
 
