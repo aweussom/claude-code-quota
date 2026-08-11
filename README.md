@@ -458,9 +458,24 @@ it, and the stored percentage is dropped rather than shown, because the library
 can prove it describes a spent window. Scoped buckets are removed from
 `scoped_limits` under the same rule.
 
-Both the PowerShell and bash libraries write the same format, so the cache is
-shared if you use both (e.g. running Claude Code natively on Windows while also
-using WSL2).
+Both libraries write and read the same format, so a cache written by one is
+readable by the other — useful if you move between environments, or install on
+Windows now and Linux later.
+
+They do **not** share a cache file, though. `~` resolves to a different place in
+each: native Windows uses `%USERPROFILE%\.claude\`, while WSL2 uses the Linux
+home (`/home/<you>/.claude/`). Install in both and you get two independent
+caches.
+
+That is the intended arrangement, and there's no need to change it. A second
+cache costs one extra fetch per TTL — a handful of requests an hour, nowhere near
+any rate limit — and in exchange each environment stays self-contained. Pointing
+both at one file (by overriding `_QL_CACHE` / `$script:_QL_Cache`) is possible
+but buys almost nothing and adds two failure modes: the WSL2 side would stat and
+parse the file across `/mnt/c` on every refresh, and if the two sides are ever on
+different library versions, an older one's writes omit `scoped_limits` — which
+counts as a legitimate delete, so the scoped segment would appear and disappear
+depending on which side wrote last.
 
 ---
 
