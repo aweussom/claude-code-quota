@@ -11,6 +11,7 @@
 #   weekly_resets_in – human string until weekly reset (or "")
 #   stale            – "true" | "false"
 #   valid            – "true" | "false"
+#   error            – human-readable reason for the last failure (or "")
 #
 # Model/surface-scoped limits (a separate allowance from the 5h and weekly
 # buckets — e.g. a per-model weekly cap).  Empty when the account has none:
@@ -29,7 +30,7 @@
 #       Set-StrictMode or alter error-action preferences at script scope.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-$script:_QL_Version = "1.1.0"
+$script:_QL_Version = "1.2.0"
 $script:_QL_Cache   = "$env:USERPROFILE\.claude\quota-data.json"
 $script:_QL_Lock    = "$env:USERPROFILE\.claude\.quota-fetch.lock"
 $script:_QL_Creds   = "$env:USERPROFILE\.claude\.credentials.json"
@@ -49,6 +50,9 @@ $script:QuotaResult = @{
     weekly_resets_in       = ""
     stale                  = "false"
     valid                  = "false"
+    error                  = ""
+    pct_unknown            = "false"
+    weekly_pct_unknown     = "false"
     scoped_summary         = ""
     scoped_alert           = "false"
     scoped_worst           = ""
@@ -611,9 +615,15 @@ function Invoke-QuotaFetchOnce {
     }
 
     try {
-        $data    = Invoke-RestMethod -Method Get -Uri $script:_QL_Api -Headers $headers `
-                       -TimeoutSec $script:_QL_Timeout -ErrorAction Stop
-        $payload = _QL_BuildSuccess $data $nowUtc
+        $data = Invoke-RestMethod -Method Get -Uri $script:_QL_Api -Headers $headers `
+                    -TimeoutSec $script:_QL_Timeout -ErrorAction Stop
+        if ($null -eq $data -or ($null -eq $data.five_hour -and $null -eq $data.seven_day)) {
+            # HTTP 200 but no usage fields — API format changed or body isn't JSON
+            $prev    = _QL_ReadCacheRaw
+            $payload = _QL_BuildStale $prev $nowUtc "API response could not be parsed (no usage fields)." 200
+        } else {
+            $payload = _QL_BuildSuccess $data $nowUtc
+        }
     } catch {
         $statusCode = $null
         try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
@@ -645,6 +655,7 @@ function _QL_ParseCache {
         weekly_resets_in       = ""
         stale                  = "false"
         valid                  = "false"
+        error                  = ""
         pct_unknown            = "false"
         weekly_pct_unknown     = "false"
         scoped_summary         = ""
@@ -658,7 +669,10 @@ function _QL_ParseCache {
 
     try {
         $data = Get-Content $script:_QL_Cache -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-    } catch { return }
+    } catch {
+        $script:QuotaResult['error'] = "Cannot parse quota-data.json (delete it to reset)."
+        return
+    }
 
     $v = _QL_GetObjectValue $data @("quota_used_pct")
     if ($null -ne $v) { $script:QuotaResult['pct'] = [string]$v }
@@ -679,6 +693,10 @@ function _QL_ParseCache {
 
     $valid = _QL_GetObjectValue $data @("valid")
     $script:QuotaResult['valid'] = if ($valid -eq $true) { "true" } else { "false" }
+
+    $v = _QL_GetObjectValue $data @("error")
+    if ([string]::IsNullOrWhiteSpace([string]$v)) { $v = _QL_GetObjectValue $data @("stale_reason") }
+    if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $script:QuotaResult['error'] = [string]$v }
 
     # "We know this bucket exists but not its current value" — distinct from
     # "no data at all".  Callers should render "?" rather than omitting the

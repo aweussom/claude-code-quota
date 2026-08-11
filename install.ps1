@@ -10,11 +10,14 @@
 #   Claude Code with OAuth login (run: claude login)
 #
 # Execution policy — if you see "cannot be loaded because running scripts is
-# disabled", run this first (once, as your normal user):
-#   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-#
-# Or run the installer directly without changing policy:
+# disabled", run the installer without changing any policy:
 #   pwsh -ExecutionPolicy Bypass -File .\install.ps1
+#
+# On managed machines (GPO/Intune) the Bypass flag can be overridden by
+# MachinePolicy/UserPolicy; there, set a persistent per-user policy instead:
+#   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+# See the "Execution policy" section in README.md for how to tell which
+# case applies (Get-ExecutionPolicy -List).
 
 [CmdletBinding()]
 param(
@@ -210,6 +213,7 @@ if ($hasConflictingCmd) {
     `$QuotaResult['resets_in']    # "1 hr 12 min"
     `$QuotaResult['weekly_pct']   # "31"  (7-day % used)
     `$QuotaResult['stale']        # "true" / "false"
+    `$QuotaResult['error']        # why the last fetch failed, or ""
 
   Tip: if you installed the /quota skill, ask Claude:
     /quota  →  then ask "how do I add quota to my statusline?"
@@ -266,6 +270,9 @@ if (Confirm-Step "Run a test fetch now to verify credentials and API access?" -D
         Write-Info "  resets in : $($QuotaResult['resets_in'])"
         Write-Info "  weekly    : $($QuotaResult['weekly_pct'])%"
         Write-Info "  stale     : $($QuotaResult['stale'])"
+        if ($QuotaResult['error'] -ne "") {
+            Write-Warn "  error     : $($QuotaResult['error'])"
+        }
         Write-Host ""
         Write-Success "Fetch succeeded. Cache written to $ClaudeDir\quota-data.json"
     } catch {
@@ -277,13 +284,17 @@ if (Confirm-Step "Run a test fetch now to verify credentials and API access?" -D
 # ── Execution policy reminder ─────────────────────────────────────────────────
 Write-Hdr "Execution policy"
 Write-Host @"
-  Windows blocks unsigned scripts by default. If the statusline shows no
-  output, run this once in an elevated PowerShell session:
+  Windows blocks unsigned scripts by default. The -ExecutionPolicy Bypass
+  flag in the settings.json command (already included above) handles this
+  on unmanaged machines — no policy change needed.
+
+  On managed machines (Entra-joined, GPO/Intune) Bypass can be overridden
+  by MachinePolicy/UserPolicy. If the statusline shows no output, run:
 
       Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-  Or keep using -ExecutionPolicy Bypass in the settings.json command
-  (already included in the snippet above — no elevated rights needed).
+  To check which case applies:  Get-ExecutionPolicy -List
+  (see the "Execution policy" section in README.md for details)
 
 "@
 

@@ -17,6 +17,10 @@ Show:
   section entirely when the array is absent or empty.
 - **Data age**: when was it last successfully fetched
 - **Status**: fresh / stale (with how long it's been stale)
+- **Error**: if `stale` or not `valid`, always show the `error` (or
+  `stale_reason`) field — it says *why* the last fetch failed (e.g. expired
+  OAuth token, network error, rate limit) and is the answer to "what does the
+  ⚠ in my statusline mean?"
 - **Version**: the `lib_version` field, if present (installed claude-code-quota version)
 
 If `scoped_limits` is missing while the rest of the data is present, the cache
@@ -77,6 +81,7 @@ $q = $QuotaResult['pct']        # "68"  (5-hour % used)
 $r = $QuotaResult['resets_in']  # "1 hr 12 min"
 $w = $QuotaResult['weekly_pct'] # "31"  (7-day % used)
 # $QuotaResult['stale'] is "true" if the last fetch failed
+# $QuotaResult['error'] says why it failed, or "" — show it when pct is empty
 ```
 
 Substitute the user's actual `$env:USERPROFILE` value for `<you>` —

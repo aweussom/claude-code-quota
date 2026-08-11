@@ -12,6 +12,7 @@
 #   weekly_resets_in – human string until weekly reset (or "")
 #   stale            – "true" | "false"
 #   valid            – "true" | "false"
+#   error            – human-readable reason for the last failure (or "")
 #
 # Model/surface-scoped limits (a separate allowance from the 5h and weekly
 # buckets — e.g. a per-model weekly cap).  Empty when the account has none:
@@ -30,7 +31,7 @@
 #       statusline script and must not alter the parent shell's error behaviour.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_QL_VERSION="1.1.0"
+_QL_VERSION="1.2.0"
 _QL_CACHE="${HOME}/.claude/quota-data.json"
 _QL_LOCK="${HOME}/.claude/.quota-fetch.lock"
 _QL_CREDS="${HOME}/.claude/.credentials.json"
@@ -152,7 +153,13 @@ _ql_fetch_once() {
         prev=$(_ql_read_cache_raw)
         payload=$(_ql_build_stale "$prev" "$now" "Request failed (network error or timeout)." "null")
     elif [[ "$http_code" == "200" ]]; then
-        payload=$(_ql_build_success "$body" "$now")
+        if echo "$body" | jq -e '(.five_hour // .seven_day) != null' >/dev/null 2>&1; then
+            payload=$(_ql_build_success "$body" "$now")
+        else
+            # HTTP 200 but no usage fields — API format changed or body isn't JSON
+            prev=$(_ql_read_cache_raw)
+            payload=$(_ql_build_stale "$prev" "$now" "API response could not be parsed (no usage fields)." "200")
+        fi
     elif [[ "$http_code" == "401" ]]; then
         prev=$(_ql_read_cache_raw)
         payload=$(_ql_build_stale "$prev" "$now" "OAuth token rejected (HTTP 401). Re-authenticate Claude Code." "401")
@@ -534,9 +541,13 @@ _ql_parse_cache() {
         (.weekly_limits.resets_in   // .weekly_resets // ""),
         (.stale                     // false | tostring),
         (.valid                     // false | tostring),
+        (.error                     // .stale_reason // ""),
         (if (.current_session.percent_unknown // false) then "true" else "false" end),
         (if (.weekly_limits.percent_unknown   // false) then "true" else "false" end)
-    ] | join("")' "$_QL_CACHE" 2>/dev/null) || return
+    ] | join("")' "$_QL_CACHE" 2>/dev/null) || {
+        QUOTA_RESULT[error]="Cannot parse quota-data.json (delete it to reset)."
+        return
+    }
 
     IFS=$'\x1f' read -r \
         QUOTA_RESULT[pct] \
@@ -545,6 +556,7 @@ _ql_parse_cache() {
         QUOTA_RESULT[weekly_resets_in] \
         QUOTA_RESULT[stale] \
         QUOTA_RESULT[valid] \
+        QUOTA_RESULT[error] \
         QUOTA_RESULT[pct_unknown] \
         QUOTA_RESULT[weekly_pct_unknown] \
         <<< "$fields"

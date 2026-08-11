@@ -91,18 +91,24 @@ if ($ctxPct -ne "") {
 $qpct     = $QuotaResult['pct']
 $resetsIn = $QuotaResult['resets_in']
 $isStale  = $QuotaResult['stale'] -eq 'true'
+$qerr     = $QuotaResult['error']
 if ($qpct -ne "") {
     $n     = [double]$qpct
     $color = if ($n -gt 75) { $cRed } elseif ($n -gt 50) { $cYellow } else { $cGreen }
     $label = "${qpct}%"
-    if ($isStale)  { $label += "⚠" }
+    if ($isStale)  { $label += "⚠" }   # ⚠ = last fetch failed, showing older data (run /quota for details)
     if ($resetsIn) { $label += " ~$resetsIn" }
     $parts.Add("${color}5h:${label}${cReset}")
 } elseif ($QuotaResult['pct_unknown'] -eq 'true') {
     # The window rolled over while fetches were failing, so the last figure we
     # hold describes a spent window.  Say we don't know rather than print it —
-    # and don't drop the segment, which would read as "no limit".
+    # and don't drop the segment, which would read as "no limit".  Checked before
+    # the generic error below: we still know the bucket exists and when it reset,
+    # which is more useful than the fetch error that stopped us updating it.
     $parts.Add("${cYellow}5h:?⚠${cReset}")
+} elseif ($qerr -ne "") {
+    # No quota data at all — say why instead of silently showing nothing
+    $parts.Add("${cRed}quota: $qerr${cReset}")
 }
 
 $wpct    = $QuotaResult['weekly_pct']

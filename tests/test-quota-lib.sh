@@ -42,7 +42,8 @@ mkfixture() { # mkfixture <scoped_resets_at>
 echo "=== TEST 1: success path — scoped extracted, account-wide buckets excluded ==="
 _ql_write "$(_ql_build_success "$(mkfixture "$FUT_WK")" "$(_ql_now_utc)")"
 check "schema_version"  "3"       "$(jq -r '.schema_version' "$_QL_CACHE")"
-check "lib_version"     "1.1.0"   "$(jq -r '.lib_version' "$_QL_CACHE")"
+# Compare against the library's own constant so a version bump doesn't fail here.
+check "lib_version"     "$_QL_VERSION" "$(jq -r '.lib_version' "$_QL_CACHE")"
 check "scoped count"    "1"       "$(jq -r '.scoped_limits | length' "$_QL_CACHE")"
 check "scoped label"    "Fable"   "$(jq -r '.scoped_limits[0].label' "$_QL_CACHE")"
 check "scoped pct"      "90"      "$(jq -r '.scoped_limits[0].percent_used' "$_QL_CACHE")"
