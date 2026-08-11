@@ -194,6 +194,34 @@ wait
 check "no torn reads under concurrency" "0" "$bad"
 check "no temp files after concurrency" "0" "$(find "$TMP" -maxdepth 1 -name 'atomic.json.*' | wc -l)"
 
+echo "=== TEST 13: countdowns are recomputed from timestamps, not read from the cache ==="
+# The stored resets_in strings are deliberately wrong: a live parse must ignore
+# them and derive the countdown from resets_at instead.  This is what makes a
+# long TTL safe — otherwise the countdown is frozen at fetch time.
+_QL_CACHE="$TMP/countdown.json"
+jq -n --arg f5 "$(iso $((now + 7200)))" --arg fw "$(iso $((now + 172800)))" '{
+  current_session:{percent_used:40,resets_at:$f5,resets_in:"STALE-5H",percent_unknown:false},
+  weekly_limits:{percent_used:50,resets_at:$fw,resets_in:"STALE-7D",percent_unknown:false},
+  scoped_limits:[], stale:false, valid:true,
+  quota_used_pct:40, weekly_used_pct:50, resets_in:"STALE-5H", weekly_resets:"STALE-7D"
+}' > "$_QL_CACHE"
+_ql_parse_cache
+check "5h countdown recomputed" "1h59m" "${QUOTA_RESULT[resets_in]:-}"
+check "7d countdown recomputed" "1d23h" "${QUOTA_RESULT[weekly_resets_in]:-}"
+check "stored string not used (5h)" "no" "$([[ ${QUOTA_RESULT[resets_in]:-} == STALE-5H ]] && echo yes || echo no)"
+check "stored string not used (7d)" "no" "$([[ ${QUOTA_RESULT[weekly_resets_in]:-} == STALE-7D ]] && echo yes || echo no)"
+
+echo "=== TEST 14: countdown falls back to the stored string with no timestamp ==="
+jq -n '{
+  current_session:{percent_used:40,resets_at:"",resets_in:"2h30m",percent_unknown:false},
+  weekly_limits:{percent_used:50,resets_at:"",resets_in:"",percent_unknown:false},
+  scoped_limits:[], stale:false, valid:true,
+  quota_used_pct:40, weekly_used_pct:50, resets_in:"2h30m", weekly_resets:"4d1h"
+}' > "$_QL_CACHE"
+_ql_parse_cache
+check "falls back to bucket string"  "2h30m" "${QUOTA_RESULT[resets_in]:-}"
+check "falls back to legacy top-level" "4d1h" "${QUOTA_RESULT[weekly_resets_in]:-}"
+
 echo
 if (( fails == 0 )); then echo "ALL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; fi
 exit $(( fails > 0 ? 1 : 0 ))

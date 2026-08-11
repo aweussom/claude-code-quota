@@ -272,6 +272,20 @@ _ql_scoped_pass() {
     printf '%s' "$out"
 }
 
+# Live countdown for one bucket: derive it from the bucket's resets_at, falling
+# back to the string stored at fetch time only when there is no timestamp.
+#   $1 = resets_at (ISO 8601, may be empty)
+#   $2 = resets_in stored at fetch time (fallback, may be empty)
+_ql_countdown_for() {
+    local at="$1" stored="$2" r
+    if [[ -n "$at" && "$at" != "null" ]]; then
+        r=$(_ql_time_until "$at")
+        [[ -n "$r" ]] && { printf '%s' "$r"; return; }
+    fi
+    [[ "$stored" == "null" ]] && stored=""
+    printf '%s' "$stored"
+}
+
 # Return raw JSON from the cache file, or "null" if absent/corrupt.
 _ql_read_cache_raw() {
     [[ ! -f "$_QL_CACHE" ]] && echo "null" && return
@@ -537,8 +551,10 @@ _ql_parse_cache() {
     fields=$(jq -r '[
         (.quota_used_pct            // "" | tostring),
         (.weekly_used_pct           // "" | tostring),
-        (.current_session.resets_in // .resets_in    // ""),
-        (.weekly_limits.resets_in   // .weekly_resets // ""),
+        (.current_session.resets_at // ""),
+        (.weekly_limits.resets_at   // ""),
+        (if ((.current_session.resets_in // "") != "") then .current_session.resets_in else (.resets_in // "") end),
+        (if ((.weekly_limits.resets_in   // "") != "") then .weekly_limits.resets_in   else (.weekly_resets // "") end),
         (.stale                     // false | tostring),
         (.valid                     // false | tostring),
         (.error                     // .stale_reason // ""),
@@ -549,17 +565,28 @@ _ql_parse_cache() {
         return
     }
 
+    local _cur_at _weekly_at _cur_in _weekly_in
     IFS=$'\x1f' read -r \
         QUOTA_RESULT[pct] \
         QUOTA_RESULT[weekly_pct] \
-        QUOTA_RESULT[resets_in] \
-        QUOTA_RESULT[weekly_resets_in] \
+        _cur_at \
+        _weekly_at \
+        _cur_in \
+        _weekly_in \
         QUOTA_RESULT[stale] \
         QUOTA_RESULT[valid] \
         QUOTA_RESULT[error] \
         QUOTA_RESULT[pct_unknown] \
         QUOTA_RESULT[weekly_pct_unknown] \
         <<< "$fields"
+
+    # Derive the countdowns from the stored timestamps instead of trusting the
+    # strings written at fetch time.  On a cache hit those strings are as old as
+    # the cache, so a 5-minute TTL means a countdown that under-reports by up to
+    # 5 minutes, and a longer TTL makes it worse.  Fall back to the stored string
+    # only when there is no timestamp to compute from.
+    QUOTA_RESULT[resets_in]=$(_ql_countdown_for "$_cur_at" "$_cur_in")
+    QUOTA_RESULT[weekly_resets_in]=$(_ql_countdown_for "$_weekly_at" "$_weekly_in")
 
     _ql_parse_scoped
 }
@@ -603,6 +630,6 @@ _ql_parse_scoped() {
     a=$(date -d "$w_at" +%s 2>/dev/null)      || return
     b=$(date -d "$weekly_at" +%s 2>/dev/null) || return
     delta=$(( a > b ? a - b : b - a ))
-    (( delta >= 60 )) && QUOTA_RESULT[scoped_worst_resets_in]="$w_in"
+    (( delta >= 60 )) && QUOTA_RESULT[scoped_worst_resets_in]=$(_ql_countdown_for "$w_at" "$w_in")
     return 0
 }

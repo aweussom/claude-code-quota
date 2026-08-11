@@ -233,7 +233,8 @@ function _QL_DateToIso {
 
 # ISO 8601 timestamp → "X d Y hr Z min" (or "" for missing/past).
 function _QL_GetTimeUntil {
-    param([AllowNull()][string]$IsoTimestamp)
+    param([AllowNull()]$Timestamp)
+    $IsoTimestamp = _QL_DateToIso $Timestamp
     if ([string]::IsNullOrWhiteSpace($IsoTimestamp)) { return "" }
     try {
         $target = [DateTimeOffset]::Parse(
@@ -274,7 +275,8 @@ function _QL_GetObjectValue {
 
 # True when an ISO 8601 timestamp is in the past (or unparseable).
 function _QL_IsPast {
-    param([AllowNull()][string]$IsoTimestamp)
+    param([AllowNull()]$Timestamp)
+    $IsoTimestamp = _QL_DateToIso $Timestamp
     if ([string]::IsNullOrWhiteSpace($IsoTimestamp)) { return $false }
     try {
         $t = [DateTimeOffset]::Parse(
@@ -348,7 +350,7 @@ function _QL_CarryScopedLimits {
     foreach ($entry in @($prev)) {
         if ($null -eq $entry) { continue }
 
-        $at = [string](_QL_GetObjectValue $entry @("resets_at"))
+        $at = _QL_DateToIso (_QL_GetObjectValue $entry @("resets_at"))
         if (_QL_IsPast $at) { continue }
 
         $pct = _QL_NormalizePercent (_QL_GetObjectValue $entry @("percent_used"))
@@ -478,11 +480,11 @@ function _QL_BuildStale {
             $weeklyPct = _QL_NormalizePercent (_QL_GetObjectValue $Previous @("weekly_used_pct"))
         }
 
-        $v = _QL_GetObjectValue $Previous @("current_session", "resets_at")
-        if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $curAt = [string]$v }
+        $v = _QL_DateToIso (_QL_GetObjectValue $Previous @("current_session", "resets_at"))
+        if (-not [string]::IsNullOrWhiteSpace($v)) { $curAt = $v }
 
-        $v = _QL_GetObjectValue $Previous @("weekly_limits", "resets_at")
-        if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $weeklyAt = [string]$v }
+        $v = _QL_DateToIso (_QL_GetObjectValue $Previous @("weekly_limits", "resets_at"))
+        if (-not [string]::IsNullOrWhiteSpace($v)) { $weeklyAt = $v }
 
         $v = _QL_GetObjectValue $Previous @("current_session", "resets_in")
         if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $curIn = [string]$v }
@@ -680,13 +682,13 @@ function _QL_ParseCache {
     $v = _QL_GetObjectValue $data @("weekly_used_pct")
     if ($null -ne $v) { $script:QuotaResult['weekly_pct'] = [string]$v }
 
-    $v = _QL_GetObjectValue $data @("current_session", "resets_in")
-    if ([string]::IsNullOrWhiteSpace([string]$v)) { $v = _QL_GetObjectValue $data @("resets_in") }
-    if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $script:QuotaResult['resets_in'] = [string]$v }
-
-    $v = _QL_GetObjectValue $data @("weekly_limits", "resets_in")
-    if ([string]::IsNullOrWhiteSpace([string]$v)) { $v = _QL_GetObjectValue $data @("weekly_resets") }
-    if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $script:QuotaResult['weekly_resets_in'] = [string]$v }
+    # Recompute countdowns from the stored timestamps rather than trusting the
+    # strings written at fetch time.  On a cache hit those strings are as old as
+    # the cache, so a 5-minute TTL means a countdown that under-reports by up to
+    # 5 minutes — and any longer TTL makes it worse.  Fall back to the stored
+    # string only when there's no timestamp to compute from.
+    $script:QuotaResult['resets_in']        = _QL_CountdownFor $data @("current_session") @("resets_in")
+    $script:QuotaResult['weekly_resets_in'] = _QL_CountdownFor $data @("weekly_limits")   @("weekly_resets")
 
     $stale = _QL_GetObjectValue $data @("stale")
     $script:QuotaResult['stale'] = if ($stale -eq $true) { "true" } else { "false" }
@@ -718,7 +720,7 @@ function _QL_ParseScopedLimits {
     $scoped = _QL_GetObjectValue $Data @("scoped_limits")
     if ($null -eq $scoped) { return }
 
-    $weeklyAt = [string](_QL_GetObjectValue $Data @("weekly_limits", "resets_at"))
+    $weeklyAt = _QL_DateToIso (_QL_GetObjectValue $Data @("weekly_limits", "resets_at"))
     $parts    = @()
     $worst    = $null
     $worstPct = -1
@@ -748,17 +750,41 @@ function _QL_ParseScopedLimits {
     # Only surface a separate countdown when this bucket resets on a different
     # boundary than the weekly one — today they coincide, so printing both would
     # just be noise.  A promotional bucket on its own cadence lights up for free.
-    $at = [string](_QL_GetObjectValue $worst @("resets_at"))
+    $at = _QL_DateToIso (_QL_GetObjectValue $worst @("resets_at"))
     if ([string]::IsNullOrWhiteSpace($at)) { return }
     if (-not (_QL_SameInstant $at $weeklyAt)) {
-        $script:QuotaResult['scoped_worst_resets_in'] = [string](_QL_GetObjectValue $worst @("resets_in"))
+        $script:QuotaResult['scoped_worst_resets_in'] = _QL_CountdownFor $worst @() @("resets_in")
     }
+}
+
+# Live countdown for one bucket: derive it from the bucket's resets_at, and only
+# fall back to the string stored at fetch time when no timestamp is available.
+# $BucketPath is the bucket object (e.g. @("current_session")); $LegacyPath is
+# the flat top-level key kept for older cache files (e.g. @("resets_in")).
+function _QL_CountdownFor {
+    param($Data, [string[]]$BucketPath, [string[]]$LegacyPath)
+
+    # _QL_DateToIso, not [string]: ConvertFrom-Json turns an ISO timestamp into a
+    # local-time DateTime, and casting that to string drops the UTC marker — the
+    # countdown then comes out wrong by the machine's UTC offset, which is enough
+    # to make a live bucket look already-reset.
+    $at = _QL_DateToIso (_QL_GetObjectValue $Data ($BucketPath + @("resets_at")))
+    if (-not [string]::IsNullOrWhiteSpace($at)) {
+        $r = _QL_GetTimeUntil $at
+        if (-not [string]::IsNullOrWhiteSpace($r)) { return $r }
+    }
+    $v = _QL_GetObjectValue $Data ($BucketPath + @("resets_in"))
+    if ([string]::IsNullOrWhiteSpace([string]$v)) { $v = _QL_GetObjectValue $Data $LegacyPath }
+    if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return [string]$v }
+    return ""
 }
 
 # Two ISO timestamps within a minute of each other — close enough that they're
 # the same reset boundary (the API's differ by microseconds).
 function _QL_SameInstant {
-    param([AllowNull()][string]$A, [AllowNull()][string]$B)
+    param([AllowNull()]$RawA, [AllowNull()]$RawB)
+    $A = _QL_DateToIso $RawA
+    $B = _QL_DateToIso $RawB
     if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
     try {
         $styles = [System.Globalization.DateTimeStyles]::RoundtripKind

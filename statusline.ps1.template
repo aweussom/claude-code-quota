@@ -21,10 +21,13 @@ catch { Write-Output "ctx:?%"; exit 0 }
 $modelLabel = ""
 if (-not [string]::IsNullOrWhiteSpace($session.model)) {
     $m = $session.model
-    # Map model ID → friendly name: claude-sonnet-4-6 → "Sonnet 4.6"
-    if ($m -match 'claude-(opus|sonnet|haiku)-(\d+)-(\d+)') {
+    # Map model ID → friendly name: claude-sonnet-4-6 → "Sonnet 4.6",
+    # claude-opus-5 → "Opus 5".  The minor component is optional because newer
+    # IDs omit it, and any trailing date suffix is ignored.
+    if ($m -match 'claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?') {
         $family     = (Get-Culture).TextInfo.ToTitleCase($Matches[1])
-        $modelLabel = "$family $($Matches[2]).$($Matches[3])"
+        $modelLabel = "$family $($Matches[2])"
+        if ($Matches[3]) { $modelLabel += ".$($Matches[3])" }
     } else {
         $modelLabel = $m  # fallback: raw ID
     }
