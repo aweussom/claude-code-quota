@@ -30,7 +30,7 @@
 #       Set-StrictMode or alter error-action preferences at script scope.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-$script:_QL_Version = "1.2.0"
+$script:_QL_Version = "2.0.0"
 $script:_QL_Cache   = "$env:USERPROFILE\.claude\quota-data.json"
 $script:_QL_Lock    = "$env:USERPROFILE\.claude\.quota-fetch.lock"
 $script:_QL_Creds   = "$env:USERPROFILE\.claude\.credentials.json"

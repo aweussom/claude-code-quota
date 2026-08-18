@@ -433,7 +433,7 @@ See the `$QuotaResult` notes above for how scoped limits are derived and why
 ```json
 {
   "schema_version": 3,
-  "lib_version": "1.2.0",
+  "lib_version": "2.0.0",
   "current_session": { "percent_used": 68, "resets_at": "...", "resets_in": "1 hr 12 min", "percent_unknown": false },
   "weekly_limits":   { "percent_used": 31, "resets_at": "...", "resets_in": "4 d 2 hr 5 min", "percent_unknown": false },
   "scoped_limits":   [

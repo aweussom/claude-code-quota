@@ -1,7 +1,7 @@
 {
   "name": "claude-code-quota",
   "description": "Claude OAuth quota (5-hour session and weekly %) in your Claude Code status line — Windows (PowerShell) and Linux/WSL2, no daemon required.",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "author": { "name": "Tommy Leonhardsen" },
   "homepage": "https://github.com/aweussom/claude-code-quota",
   "repository": "https://github.com/aweussom/claude-code-quota",

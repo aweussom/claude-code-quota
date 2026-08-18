@@ -31,7 +31,7 @@
 #       statusline script and must not alter the parent shell's error behaviour.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_QL_VERSION="1.2.0"
+_QL_VERSION="2.0.0"
 _QL_CACHE="${HOME}/.claude/quota-data.json"
 _QL_LOCK="${HOME}/.claude/.quota-fetch.lock"
 _QL_CREDS="${HOME}/.claude/.credentials.json"
