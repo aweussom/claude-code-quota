@@ -45,6 +45,38 @@ reintroduce this — do not add a `[string]` type constraint to their parameters
 
 Bash is immune: `jq` returns the raw string.
 
+### PowerShell: a BOM-less UTF-8 `.ps1` is parsed as ANSI by 5.1
+
+Windows PowerShell 5.1 has no way to know a `.ps1` is UTF-8 unless it starts
+with a BOM, so it falls back to the ANSI code page. An em-dash (`E2 80 94`)
+then decodes to `â€` plus **U+201D**, and PowerShell accepts U+201D as a
+*string delimiter*. The string closes early, the parser desyncs, and you get
+`Missing closing '}'` errors pointing at four lines that are all perfectly
+fine — the real culprit is a comment-adjacent em-dash dozens of lines away.
+
+`install.ps1` shipped this way. `statusline.ps1.template` had the quieter
+version of the same bug: its `⚠` markers are in *emitted* strings, so 5.1
+printed mojibake instead of erroring.
+
+**Rule: every `.ps1` and `.ps1.template` starts with a UTF-8 BOM.** The
+Windows suite enforces it. Note that a BOM is a prerequisite for any
+`#Requires` gate to work at all — PowerShell parses the whole file before it
+evaluates `#Requires`, so a parse error always wins.
+
+### Windows PowerShell 5.1 is not supported — fail at the door
+
+pwsh 7+ only. Every entry point (`install.ps1`, `statusline.ps1.template`,
+`_quota-fetch-helper.ps1`) carries `#Requires -Version 7.0`, and nothing falls
+back to `powershell.exe`. A 5.1 fallback does not degrade gracefully: it
+mangles glyphs, and in the background worker it would write a mis-encoded
+shared cache that every other session then reads.
+
+`quota-lib.ps1` deliberately has **no** `#Requires` — it is dot-sourced, and
+the directive would throw in the *caller*, which is the same class of change as
+`Set-StrictMode`. It resolves its worker host from
+`[Environment]::ProcessPath` (the pwsh already running it) rather than
+searching PATH.
+
 ### Bash: the field separator must not be IFS whitespace
 
 `jq ... | join("\t")` piped into `IFS=$'\t' read -r a b c` is broken. Tab is IFS
@@ -114,13 +146,23 @@ valid, semantically wrong. **Always run the test suite, not just the linter.**
 ## Tests
 
 ```bash
-bash tests/test-quota-lib.sh        # requires jq; exits 2 if missing
+bash tests/test-quota-lib.sh        # Linux/WSL2 half; requires jq, exits 2 if missing
 ```
 
-Covers the bash library only, over synthetic fixtures shaped like real API
-responses. **No network calls** — the suite must never be able to consume quota
-or trip a rate limit. It has caught two real bugs that review missed; add a case
-whenever you fix something.
+```powershell
+pwsh -NoProfile -File tests/test-quota-lib.ps1   # Windows half; no jq, no network
+```
 
-PowerShell has no suite yet. Verify changes there against a live fetch *and* a
+`tests/test-quota-lib.sh` covers the bash library, over synthetic fixtures
+shaped like real API responses. **Neither suite makes network calls** — they
+must never be able to consume quota or trip a rate limit. The bash suite has
+caught two real bugs that review missed; add a case whenever you fix
+something.
+
+`tests/test-quota-lib.ps1` covers encoding and version-gate invariants only —
+BOMs, `#Requires`, no `powershell.exe` fallback, and that every file parses. It
+has no fixtures. For logic changes, still verify against a live fetch *and* a
 synthetic stale payload, including the rollover path.
+
+Shell scripts are for the Linux/WSL2 install; do not guard Windows behaviour
+from bash.

@@ -1,4 +1,4 @@
-<# 
+﻿<# 
   Test Claude Code Chrome integration by extracting quota data from claude.ai.
   Requires: Claude Code CLI + Claude in Chrome extension + active login session.
 #>

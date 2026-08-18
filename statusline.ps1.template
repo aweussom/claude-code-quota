@@ -1,10 +1,15 @@
-#
+﻿#
 # statusline.ps1 — Claude Code status line (installed by claude-code-quota)
 #
 # Output example:
 #   Sonnet 4.6 | main │ ctx:42% │ 5h:68% ~1 hr 12 min │ 7d:31% ~4 d 2 hr 5 min
 #
+# Requires PowerShell 7+: settings.json must launch this with pwsh, not
+# powershell.exe, which mis-decodes this file's UTF-8 glyphs.
+#
 # Edit this file freely. Requires quota-lib.ps1 in %USERPROFILE%\.claude\
+
+#Requires -Version 7.0
 
 # ── Output encoding ───────────────────────────────────────────────────────────
 # Claude Code captures stdout through a pipe, where PowerShell defaults to the

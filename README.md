@@ -108,7 +108,7 @@ pwsh -ExecutionPolicy Bypass -File .\install.ps1
 
 The installer:
 
-1. Detects `pwsh` (7+) or falls back to `powershell.exe` (5.1)
+1. Requires `pwsh` (PowerShell 7+) and aborts if it is missing or not on PATH
 2. Checks for the Claude OAuth credentials file
 3. Copies `quota-lib.ps1` and `_quota-fetch-helper.ps1` to `%USERPROFILE%\.claude\`
 4. Optionally copies `skills\quota\SKILL.md` (enables the `/quota` skill)
@@ -203,7 +203,9 @@ In `%USERPROFILE%\.claude\settings.json`:
 > executes this command via bash on Windows, where `%USERPROFILE%` is **not**
 > expanded. The installer writes the correct absolute path automatically.
 
-Use `powershell` instead of `pwsh` if you only have PowerShell 5.1.
+The command must invoke `pwsh`. Windows PowerShell 5.1 (`powershell.exe`) is
+not supported: it reads these UTF-8 scripts as ANSI, mangling the glyphs, and
+the statusline refuses to run under it.
 
 ### `$QuotaResult` reference
 
@@ -294,8 +296,10 @@ Get-ExecutionPolicy -List
 
 ### Performance
 
-- `pwsh` (PowerShell 7+): ~100–200 ms cold start — recommended
-- `powershell.exe` (5.1): ~300–500 ms cold start — works but slower
+- `pwsh` (PowerShell 7+): ~100–200 ms cold start — required
+
+Windows PowerShell 5.1 is not supported. `install.ps1` and `statusline.ps1`
+both carry `#Requires -Version 7.0` and stop immediately under it.
 
 The background refresh adds no extra latency: it runs as a detached process
 while the statusline immediately returns the previous frame's cached data.

@@ -1,4 +1,4 @@
-#
+﻿#
 # quota-lib.ps1 — Self-contained quota library for Claude Code statusline (Windows)
 #
 # Dot-source this file, then call:
@@ -111,7 +111,12 @@ function Invoke-QuotaGet {
         } else {
             # Stale cache — refresh in background, return previous data this frame
             $helperPath = "$env:USERPROFILE\.claude\_quota-fetch-helper.ps1"
-            $pwshExe    = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
+            # Reuse the exact host already executing us (pwsh 7+, enforced by
+            # the statusline's #Requires). Never fall back to powershell.exe:
+            # 5.1 mis-decodes the helper's UTF-8 and would poison the shared
+            # cache that every session reads.
+            $pwshExe    = [Environment]::ProcessPath
+            if ([string]::IsNullOrWhiteSpace($pwshExe)) { $pwshExe = "pwsh" }
             try {
                 $proc = Start-Process $pwshExe `
                     -ArgumentList "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$helperPath`"" `

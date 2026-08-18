@@ -1,4 +1,4 @@
-#
+﻿#
 # install.ps1 — Install claude-code-quota into %USERPROFILE%\.claude\ (Windows)
 #
 # Usage:
@@ -6,7 +6,7 @@
 #   .\install.ps1 -Yes         # non-interactive (accept all defaults)
 #
 # Requirements:
-#   PowerShell 5.1+ (pwsh 7+ recommended for best performance)
+#   PowerShell 7.0+ (pwsh). Windows PowerShell 5.1 is NOT supported.
 #   Claude Code with OAuth login (run: claude login)
 #
 # Execution policy — if you see "cannot be loaded because running scripts is
@@ -18,6 +18,8 @@
 #   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 # See the "Execution policy" section in README.md for how to tell which
 # case applies (Get-ExecutionPolicy -List).
+
+#Requires -Version 7.0
 
 [CmdletBinding()]
 param(
@@ -35,6 +37,7 @@ $SkillsDir  = "$ClaudeDir\skills\quota"
 function Write-Info    { param([string]$Msg) Write-Host "  $Msg" }
 function Write-Success { param([string]$Msg) Write-Host "  [OK] $Msg" -ForegroundColor Green }
 function Write-Warn    { param([string]$Msg) Write-Host "  [!]  $Msg" -ForegroundColor Yellow }
+function Write-Err     { param([string]$Msg) Write-Host "  [X]  $Msg" -ForegroundColor Red }
 function Write-Hdr     { param([string]$Msg) Write-Host "`n-- $Msg " -ForegroundColor Cyan }
 
 function Confirm-Step {
@@ -72,14 +75,28 @@ Write-Hdr "PowerShell version"
 $psVer = $PSVersionTable.PSVersion
 Write-Info "PowerShell $psVer"
 
-$pwshAvail = $null -ne (Get-Command pwsh -ErrorAction SilentlyContinue)
-if ($pwshAvail) {
-    $pwshVer = & pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
-    Write-Success "pwsh (PowerShell 7+) found: $pwshVer  <-- recommended for best performance"
-} else {
-    Write-Warn "pwsh (PowerShell 7+) not found. Using powershell.exe (5.1) — slower startup."
-    Write-Warn "Install from: https://aka.ms/powershell"
+# Belt and braces. The #Requires above already refuses to run this script on
+# 5.1, but it is only reachable once the file parses -- and 5.1 reads a
+# BOM-less UTF-8 .ps1 as ANSI, which turns an em-dash into U+201D, a character
+# PowerShell accepts as a string delimiter. The parser then dies before
+# #Requires is ever evaluated. Keep every .ps1 BOM'd AND keep this check;
+# neither one alone fails cleanly.
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Err "PowerShell 7.0+ is required. This is $psVer."
+    Write-Err "Install from: https://aka.ms/powershell, then re-run under pwsh:"
+    Write-Err "  pwsh -ExecutionPolicy Bypass -File .\install.ps1"
+    exit 1
 }
+
+# The statusline command written into settings.json invokes `pwsh` by name, so
+# it must resolve on PATH for Claude Code -- not merely for this shell.
+if ($null -eq (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+    Write-Err "'pwsh' is not on PATH."
+    Write-Err "Claude Code launches the statusline as 'pwsh ...', so PATH must resolve it."
+    Write-Err "Install from: https://aka.ms/powershell, or add the existing pwsh.exe to PATH."
+    exit 1
+}
+Write-Success "pwsh $psVer"
 
 # ── Credentials check ─────────────────────────────────────────────────────────
 Write-Hdr "Claude Code credentials"
@@ -145,7 +162,7 @@ if (Confirm-Step "Install the /quota Claude Code skill?") {
 # ── Statusline + settings.json ────────────────────────────────────────────────
 Write-Hdr "Statusline integration"
 
-$pwshCmd        = if ($pwshAvail) { "pwsh" } else { "powershell" }
+$pwshCmd        = "pwsh"   # guaranteed present by the version check above
 $statuslineDst  = "$ClaudeDir\statusline.ps1"
 $statuslineAbs  = $statuslineDst -replace '\\', '/'
 $settingsCmd    = "$pwshCmd -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $statuslineAbs"
@@ -188,6 +205,14 @@ if ($hasConflictingCmd) {
     # ── Case A: different command already in settings.json ────────────────────
     Write-Info "Existing statusLine command in settings.json:"
     Write-Info "  $existingStatusCmd"
+    # First token of the command is the host executable; compare its leaf name.
+    $existingExe = (($existingStatusCmd -split '\s+', 2)[0]).Trim('"')
+    $existingLeaf = [System.IO.Path]::GetFileNameWithoutExtension($existingExe)
+    if ($existingLeaf -ieq 'powershell') {
+        Write-Err "That command launches Windows PowerShell 5.1, which is not supported."
+        Write-Err "Replace 'powershell' with 'pwsh' in $settingsPath -- under 5.1 the"
+        Write-Err "statusline aborts on its #Requires and your status line stays blank."
+    }
     Write-Info "Leaving settings.json unchanged."
     Write-Host @"
 
