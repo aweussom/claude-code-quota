@@ -220,7 +220,7 @@ if ($hasConflictingCmd) {
   the top of your statusline script (before you build the output string):
 
   ------------------------------------------------------------------
-  `$libPath = "$statuslineAbs" -replace '/', '\'
+  `$libPath = "`$env:USERPROFILE\.claude\quota-lib.ps1"
   if (Test-Path `$libPath) {
       . `$libPath
       `$ttl = 300

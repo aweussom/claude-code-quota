@@ -23,19 +23,41 @@ try   { $session = $sessionRaw | ConvertFrom-Json }
 catch { Write-Output "ctx:?%"; exit 0 }
 
 # ── Model + thinking level ────────────────────────────────────────────────────
+# Claude Code sends `model` as an object {id, display_name}; older builds sent a
+# bare ID string. Prefer display_name -- it is Claude Code's own label and needs
+# no family list -- and map the ID only when there is nothing better.
+#
+# Never let the raw object reach $modelLabel. `-match` on a PSCustomObject
+# stringifies it to "@{id=claude-...; display_name=...}", so the regex matched
+# by accident for known families, but an unlisted family took the fallback
+# branch, assigned the *object*, and `$label += " | $gitBranch"` threw
+# op_Addition -- dropping the model AND the branch, with the error on stderr
+# where the statusline never shows it.
 $modelLabel = ""
-if (-not [string]::IsNullOrWhiteSpace($session.model)) {
-    $m = $session.model
+$mObj  = $session.model
+$mId   = ""
+$mName = ""
+if ($mObj -is [string]) {
+    $mId = $mObj
+} elseif ($null -ne $mObj) {
+    if ($mObj.PSObject.Properties['display_name']) { $mName = [string]$mObj.display_name }
+    if ($mObj.PSObject.Properties['id'])           { $mId   = [string]$mObj.id }
+}
+if (-not [string]::IsNullOrWhiteSpace($mName)) {
+    $modelLabel = $mName
+} elseif (-not [string]::IsNullOrWhiteSpace($mId)) {
     # Map model ID → friendly name: claude-sonnet-4-6 → "Sonnet 4.6",
     # claude-opus-5 → "Opus 5".  The minor component is optional because newer
     # IDs omit it, and any trailing date suffix is ignored.
-    if ($m -match 'claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?') {
+    if ($mId -match 'claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?') {
         $family     = (Get-Culture).TextInfo.ToTitleCase($Matches[1])
         $modelLabel = "$family $($Matches[2])"
         if ($Matches[3]) { $modelLabel += ".$($Matches[3])" }
     } else {
-        $modelLabel = $m  # fallback: raw ID
+        $modelLabel = $mId  # fallback: raw ID
     }
+}
+if ($modelLabel -ne "") {
     # Append thinking indicator if budget tokens are set
     if ($session.thinking_budget_tokens -and [int]$session.thinking_budget_tokens -gt 0) {
         $modelLabel += " (thinking)"
@@ -61,6 +83,11 @@ if ($session.context_window -and $null -ne $session.context_window.used_percenta
 }
 
 # ── Quota (via quota-lib.ps1) ─────────────────────────────────────────────────
+# Start empty so a missing quota-lib.ps1 degrades to model/branch/ctx instead
+# of "Cannot index into a null array" on every $QuotaResult read below (each
+# read is also [string]-cast: an absent key is $null, and $null -ne "" is
+# $true in PowerShell, which would render "5h:%").
+$QuotaResult = @{}
 $libPath = "$env:USERPROFILE\.claude\quota-lib.ps1"
 if (Test-Path $libPath -PathType Leaf) {
     . $libPath
@@ -96,10 +123,10 @@ if ($ctxPct -ne "") {
     $parts.Add("ctx:${ctxPct}%")
 }
 
-$qpct     = $QuotaResult['pct']
-$resetsIn = $QuotaResult['resets_in']
+$qpct     = [string]$QuotaResult['pct']
+$resetsIn = [string]$QuotaResult['resets_in']
 $isStale  = $QuotaResult['stale'] -eq 'true'
-$qerr     = $QuotaResult['error']
+$qerr     = [string]$QuotaResult['error']
 if ($qpct -ne "") {
     $n     = [double]$qpct
     $color = if ($n -gt 75) { $cRed } elseif ($n -gt 50) { $cYellow } else { $cGreen }
@@ -119,8 +146,8 @@ if ($qpct -ne "") {
     $parts.Add("${cRed}quota: $qerr${cReset}")
 }
 
-$wpct    = $QuotaResult['weekly_pct']
-$wresets = $QuotaResult['weekly_resets_in']
+$wpct    = [string]$QuotaResult['weekly_pct']
+$wresets = [string]$QuotaResult['weekly_resets_in']
 if ($wpct -ne "") {
     $label = "${wpct}%"
     if ($wresets) { $label += " ~$wresets" }
@@ -132,9 +159,9 @@ if ($wpct -ne "") {
 # Model/surface-scoped limit (e.g. a per-model weekly cap) — a separate
 # allowance from 5h/7d, so it gets its own segment rather than replacing one.
 # Absent for accounts with no scoped limits, so this normally prints nothing.
-$sworst  = $QuotaResult['scoped_worst']
-$spct    = $QuotaResult['scoped_worst_pct']
-$sresets = $QuotaResult['scoped_worst_resets_in']
+$sworst  = [string]$QuotaResult['scoped_worst']
+$spct    = [string]$QuotaResult['scoped_worst_pct']
+$sresets = [string]$QuotaResult['scoped_worst_resets_in']
 if ($sworst -ne "" -and $spct -ne "") {
     $n     = [double]$spct
     $color = if ($n -gt 75) { $cRed } elseif ($n -gt 50) { $cYellow } else { $cGreen }

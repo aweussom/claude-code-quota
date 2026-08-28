@@ -14,18 +14,26 @@
 input=$(cat)
 [[ -z "${input//[[:space:]]/}" ]] && exit 0
 
-model=$(jq -r '.model // empty'                          <<< "$input" 2>/dev/null)
+# `model` is an object {id, display_name} in current Claude Code, a bare ID
+# string in older builds. Pull both apart here so the regex below never sees
+# the object's JSON text (which it used to match by accident for known
+# families and print verbatim for any other).
+model=$(jq -r 'if (.model|type)=="object" then (.model.id // empty) else (.model // empty) end'          <<< "$input" 2>/dev/null)
+model_name=$(jq -r 'if (.model|type)=="object" then (.model.display_name // empty) else empty end' <<< "$input" 2>/dev/null)
 cwd=$(jq -r '.cwd // empty'                              <<< "$input" 2>/dev/null)
 ctx_raw=$(jq -r '.context_window.used_percentage // empty' <<< "$input" 2>/dev/null)
 transcript=$(jq -r '.transcript_path // empty'           <<< "$input" 2>/dev/null)
 thinking=$(jq -r '.thinking_budget_tokens // empty'      <<< "$input" 2>/dev/null)
 
 # ── Model + thinking level ────────────────────────────────────────────────────
-# Map model ID → friendly name: claude-sonnet-4-6 → "Sonnet 4.6",
+# Prefer display_name -- Claude Code's own label, no family list needed. Map
+# the ID only when there is nothing better: claude-sonnet-4-6 → "Sonnet 4.6",
 # claude-opus-5 → "Opus 5".  The minor component is optional because newer IDs
 # omit it, and any trailing date suffix is ignored.
 model_label=""
-if [[ -n "$model" ]]; then
+if [[ -n "$model_name" ]]; then
+    model_label="$model_name"
+elif [[ -n "$model" ]]; then
     if [[ "$model" =~ claude-(opus|sonnet|haiku|fable|mythos)-([0-9]+)(-([0-9]+))? ]]; then
         fam="${BASH_REMATCH[1]}"
         model_label="${fam^} ${BASH_REMATCH[2]}"
@@ -33,6 +41,8 @@ if [[ -n "$model" ]]; then
     else
         model_label="$model"   # fallback: raw ID
     fi
+fi
+if [[ -n "$model_label" ]]; then
     [[ -n "$thinking" && "$thinking" != "0" ]] && model_label="${model_label} (thinking)"
 fi
 

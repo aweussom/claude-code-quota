@@ -28,6 +28,14 @@ render() { # render <model-id> -> plain text, escape codes stripped
 
 label_of() { render "$1" | sed 's/ *|.*//'; }   # first segment, before the branch
 
+# Current Claude Code sends model as an object; $2 may be empty for "no display_name".
+render_obj() { # render_obj <id> <display_name>
+    local dn=""; [[ -n "$2" ]] && dn=",\"display_name\":\"$2\""
+    printf '%s' "{\"model\":{\"id\":\"$1\"$dn},\"cwd\":\"$REPO\"}" \
+      | bash "$SL" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+}
+label_of_obj() { render_obj "$1" "$2" | sed 's/ *|.*//'; }
+
 echo "=== model label mapping ==="
 check "claude-opus-5"             "Opus 5"    "$(label_of claude-opus-5)"
 check "claude-opus-4-8"           "Opus 4.8"  "$(label_of claude-opus-4-8)"
@@ -36,6 +44,12 @@ check "claude-haiku-4-5-20251001" "Haiku 4.5" "$(label_of claude-haiku-4-5-20251
 check "claude-fable-5"            "Fable 5"   "$(label_of claude-fable-5)"
 check "claude-mythos-5"           "Mythos 5"  "$(label_of claude-mythos-5)"
 check "unknown id falls through"  "weird-id"  "$(label_of weird-id)"
+
+echo "=== model as object {id, display_name} ==="
+check "display_name wins"            "Fable 5"         "$(label_of_obj claude-fable-5 "Fable 5")"
+check "display_name verbatim"        "My Model"        "$(label_of_obj claude-fable-5 "My Model")"
+check "id-only object is mapped"     "Opus 4.8"        "$(label_of_obj claude-opus-4-8 "")"
+check "unknown family: id, not JSON" "claude-zephyr-6" "$(label_of_obj claude-zephyr-6 "")"
 
 echo "=== full render (current cache) ==="
 render claude-opus-5 | sed 's/^/  /'

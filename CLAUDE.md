@@ -77,6 +77,22 @@ the directive would throw in the *caller*, which is the same class of change as
 `[Environment]::ProcessPath` (the pwsh already running it) rather than
 searching PATH.
 
+### PowerShell: `-match` on a PSCustomObject stringifies it -- and then matches
+
+Claude Code sends the statusline `model` as an object `{id, display_name}`
+(older builds sent a bare ID string). `$session.model -match 'claude-(opus|…)'`
+does not fail on the object: PowerShell renders it as
+`@{id=claude-fable-5; display_name=Fable 5}` and the regex matches *inside that*.
+So known families rendered fine, which hid the bug. An unlisted family took the
+fallback branch, assigned the **object** to `$modelLabel`, and
+`$label += " | $gitBranch"` threw `op_Addition` -- the model and the git branch
+both vanished, with the error on stderr where a statusline never shows it.
+
+**Rule: unpack `model` before comparing it.** Both templates read
+`display_name` / `id` explicitly and only ever regex a string.
+`tests/test-statusline.ps1` and `tests/test-statusline.sh` render both shapes,
+including an unlisted family.
+
 ### Bash: the field separator must not be IFS whitespace
 
 `jq ... | join("\t")` piped into `IFS=$'\t' read -r a b c` is broken. Tab is IFS
@@ -158,6 +174,16 @@ shaped like real API responses. **Neither suite makes network calls** — they
 must never be able to consume quota or trip a rate limit. The bash suite has
 caught two real bugs that review missed; add a case whenever you fix
 something.
+
+```powershell
+pwsh -NoProfile -File tests/test-statusline.ps1  # renders the PS template; no network
+bash tests/test-statusline.sh                    # renders the bash template; needs jq
+```
+
+`tests/test-statusline.{ps1,sh}` render each statusline template against
+synthetic session JSON -- both `model` shapes Claude Code has sent, an unlisted
+family, and (PS) a machine with no quota-lib in reach. The PS one points
+USERPROFILE at an empty temp dir so nothing is fetched.
 
 `tests/test-quota-lib.ps1` covers encoding and version-gate invariants only —
 BOMs, `#Requires`, no `powershell.exe` fallback, and that every file parses. It
