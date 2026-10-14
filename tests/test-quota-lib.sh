@@ -232,9 +232,18 @@ check "anthropic with path"       "anthropic" "$(ANTHROPIC_BASE_URL='https://api
 check "ollama daemon"             "ollama"    "$(ANTHROPIC_BASE_URL='http://127.0.0.1:11434' _ql_provider)"
 check "ollama localhost"          "ollama"    "$(ANTHROPIC_BASE_URL='http://localhost:11434/' _ql_provider)"
 check "ollama.com"                "ollama"    "$(ANTHROPIC_BASE_URL='https://ollama.com' _ql_provider)"
-# A different local proxy is NOT Ollama: same host, different port.
+# Observed from a live `ollama launch claude`: OLLAMA_HOST is a bind address and
+# the wrapper copies it into the base URL, so this is 0.0.0.0, not loopback.
+check "ollama bind address"       "ollama"    "$(ANTHROPIC_BASE_URL='http://0.0.0.0:11434' _ql_provider)"
+# The wrapper names itself in the auth token, which holds whatever address the
+# daemon is bound to -- including a LAN address or a non-default port.
+check "auth token names ollama"   "ollama"    "$(ANTHROPIC_BASE_URL='http://10.0.0.5:9999' ANTHROPIC_AUTH_TOKEN='ollama' _ql_provider)"
+check "matches OLLAMA_HOST"       "ollama"    "$(ANTHROPIC_BASE_URL='http://192.168.1.4:7777' OLLAMA_HOST='192.168.1.4:7777' _ql_provider)"
+# A different local proxy is NOT Ollama: same host, different port, no marker.
 check "other local proxy"         "other"     "$(ANTHROPIC_BASE_URL='http://127.0.0.1:4000' _ql_provider)"
 check "unknown gateway"           "other"     "$(ANTHROPIC_BASE_URL='https://gateway.example.com' _ql_provider)"
+# An explicit Anthropic base URL wins over a stray marker in the environment.
+check "anthropic beats marker"    "anthropic" "$(ANTHROPIC_BASE_URL='https://api.anthropic.com' ANTHROPIC_AUTH_TOKEN='ollama' _ql_provider)"
 
 echo "=== TEST 16: Ollama balance maps remaining% to used%, and drops scoped ==="
 # Ollama reports what is LEFT; everything downstream is in percent USED.  The

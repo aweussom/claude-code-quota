@@ -82,14 +82,28 @@ $script:QuotaResult = @{
 # are wrong, but we have nothing to put in their place.
 function _QL_ResolveProvider {
     $base = $env:ANTHROPIC_BASE_URL
-    if ([string]::IsNullOrWhiteSpace($base)) { return "anthropic" }
 
     $hostPart = $base -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''
     $hostPart = ($hostPart -split '[/?#]')[0]
 
     if ($hostPart -match '^api\.anthropic\.com(:\d+)?$') { return "anthropic" }
     if ($hostPart -match '(^|\.)ollama\.com(:\d+)?$')    { return "ollama" }
-    if ($hostPart -match '^(127\.0\.0\.1|localhost|\[::1\]):11434$') { return "ollama" }
+
+    # `ollama launch claude` sets ANTHROPIC_AUTH_TOKEN=ollama. That is the
+    # wrapper naming itself, and unlike a host or a port it holds whatever
+    # address the daemon happens to be bound to.
+    if ($env:ANTHROPIC_AUTH_TOKEN -eq "ollama") { return "ollama" }
+
+    if ([string]::IsNullOrWhiteSpace($hostPart)) { return "anthropic" }
+
+    # OLLAMA_HOST is a *bind* address and the wrapper copies it straight into
+    # ANTHROPIC_BASE_URL, which is why this is observed as 0.0.0.0:11434 rather
+    # than anything you could sensibly connect to.
+    $ollamaHost = $env:OLLAMA_HOST -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''
+    $ollamaHost = ($ollamaHost -split '[/?#]')[0]
+    if (-not [string]::IsNullOrWhiteSpace($ollamaHost) -and $hostPart -eq $ollamaHost) { return "ollama" }
+
+    if ($hostPart -match '^(127\.0\.0\.1|0\.0\.0\.0|localhost|\[::1\]|::1):11434$') { return "ollama" }
     return "other"
 }
 

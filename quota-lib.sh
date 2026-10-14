@@ -135,16 +135,32 @@ quota_get() {
 # are wrong, but we have nothing to put in their place.
 _ql_provider() {
     local base="${ANTHROPIC_BASE_URL:-}"
-    [[ -z "${base//[[:space:]]/}" ]] && { echo "anthropic"; return; }
 
     local host="${base#*://}"
     host="${host%%/*}"
     host="${host%%\?*}"
 
     case "$host" in
-        api.anthropic.com|api.anthropic.com:*) echo "anthropic" ;;
-        *ollama.com|*ollama.com:*)             echo "ollama" ;;
-        127.0.0.1:11434|localhost:11434|\[::1\]:11434) echo "ollama" ;;
+        api.anthropic.com|api.anthropic.com:*) echo "anthropic"; return ;;
+        *ollama.com|*ollama.com:*)             echo "ollama";    return ;;
+    esac
+
+    # `ollama launch claude` sets ANTHROPIC_AUTH_TOKEN=ollama. That is the
+    # wrapper naming itself, and unlike a host or a port it holds whatever
+    # address the daemon happens to be bound to.
+    [[ "${ANTHROPIC_AUTH_TOKEN:-}" == "ollama" ]] && { echo "ollama"; return; }
+
+    [[ -z "${host//[[:space:]]/}" ]] && { echo "anthropic"; return; }
+
+    # OLLAMA_HOST is a *bind* address and the wrapper copies it straight into
+    # ANTHROPIC_BASE_URL, which is why this is observed as 0.0.0.0:11434 rather
+    # than anything you could sensibly connect to.
+    local oh="${OLLAMA_HOST:-}"
+    oh="${oh#*://}"; oh="${oh%%/*}"
+    [[ -n "$oh" && "$host" == "$oh" ]] && { echo "ollama"; return; }
+
+    case "$host" in
+        127.0.0.1:11434|0.0.0.0:11434|localhost:11434|\[::1\]:11434|::1:11434) echo "ollama" ;;
         *) echo "other" ;;
     esac
 }

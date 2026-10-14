@@ -133,11 +133,29 @@ different account than the one doing the work.
 serve `claude-*` names from anywhere. Three outcomes:
 
 - unset, or `api.anthropic.com` → `anthropic`
-- `ollama.com`, or `11434` on loopback → `ollama`, read
+- `ollama.com`, or `ANTHROPIC_AUTH_TOKEN=ollama`, or a host:port matching
+  `OLLAMA_HOST`, or `11434` on a local address → `ollama`, read
   `https://ollama.com/api/balance` with `Bearer $OLLAMA_API_KEY`
 - anything else → `other`, and **no quota segments at all**. We can prove the
   Anthropic figures are wrong and have nothing to put in their place, so the
   segments are omitted rather than filled with a guess.
+
+A live `ollama launch claude --model glm-5.3-flash:cloud` sets:
+
+```
+ANTHROPIC_BASE_URL=http://0.0.0.0:11434
+ANTHROPIC_AUTH_TOKEN=ollama
+ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL=glm-5.3-flash:cloud
+ANTHROPIC_API_KEY=
+```
+
+**`0.0.0.0`, not loopback.** `OLLAMA_HOST` is a *bind* address and the wrapper
+copies it into the base URL verbatim, so the figure you get is whatever the
+daemon binds to — a LAN address or a non-default port if the user set one. The
+first version of this check accepted only `127.0.0.1`, `localhost` and `[::1]`
+on `11434`, classified a real session as `other`, and silently printed no quota
+segments at all. `ANTHROPIC_AUTH_TOKEN=ollama` is the wrapper naming itself and
+is the signal to trust; the address list is a fallback.
 
 Ollama reports `remaining_percent`; everything downstream is percent *used*, so
 the builders convert. Its `scoped_limits` is always `[]` — that is what stops a
