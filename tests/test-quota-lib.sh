@@ -222,6 +222,79 @@ _ql_parse_cache
 check "falls back to bucket string"  "2h30m" "${QUOTA_RESULT[resets_in]:-}"
 check "falls back to legacy top-level" "4d1h" "${QUOTA_RESULT[weekly_resets_in]:-}"
 
+echo "=== TEST 15: provider is decided by ANTHROPIC_BASE_URL, not by the model ==="
+# A gateway can serve claude-* model names from somewhere else entirely, so the
+# base URL is the only thing that says whose allowance a session spends.
+check "unset        -> anthropic" "anthropic" "$(ANTHROPIC_BASE_URL=    _ql_provider)"
+check "blank        -> anthropic" "anthropic" "$(ANTHROPIC_BASE_URL='   ' _ql_provider)"
+check "api.anthropic.com"         "anthropic" "$(ANTHROPIC_BASE_URL='https://api.anthropic.com' _ql_provider)"
+check "anthropic with path"       "anthropic" "$(ANTHROPIC_BASE_URL='https://api.anthropic.com/v1' _ql_provider)"
+check "ollama daemon"             "ollama"    "$(ANTHROPIC_BASE_URL='http://127.0.0.1:11434' _ql_provider)"
+check "ollama localhost"          "ollama"    "$(ANTHROPIC_BASE_URL='http://localhost:11434/' _ql_provider)"
+check "ollama.com"                "ollama"    "$(ANTHROPIC_BASE_URL='https://ollama.com' _ql_provider)"
+# A different local proxy is NOT Ollama: same host, different port.
+check "other local proxy"         "other"     "$(ANTHROPIC_BASE_URL='http://127.0.0.1:4000' _ql_provider)"
+check "unknown gateway"           "other"     "$(ANTHROPIC_BASE_URL='https://gateway.example.com' _ql_provider)"
+
+echo "=== TEST 16: Ollama balance maps remaining% to used%, and drops scoped ==="
+# Ollama reports what is LEFT; everything downstream is in percent USED.  The
+# empty scoped_limits is what stops a stale "Fable:0%" following you into an
+# Ollama session.
+_QL_PROVIDER="ollama"
+_QL_CACHE="$TMP/quota-data-ollama.json"
+ollama_body=$(jq -n --arg f5 "$FUT_5H" --arg fw "$FUT_WK" '{
+  included: {
+    session: {remaining_percent: 99.1,  resets_at: $f5},
+    weekly:  {remaining_percent: 73.81, resets_at: $fw}
+  },
+  purchased: {balance_usd: 0.73493}
+}')
+_ql_write "$(_ql_build_success_ollama "$ollama_body" "$(_ql_now_utc)")"
+check "provider recorded"  "ollama"  "$(jq -r '.provider' "$_QL_CACHE")"
+check "source_url"         "$_QL_OLLAMA_API" "$(jq -r '.source_url' "$_QL_CACHE")"
+check "5h used from remaining"  "0.9"   "$(jq -r '.quota_used_pct' "$_QL_CACHE")"
+check "7d used from remaining"  "26.19" "$(jq -r '.weekly_used_pct' "$_QL_CACHE")"
+check "balance stored"     "0.73493" "$(jq -r '.purchased_balance_usd' "$_QL_CACHE")"
+check "no scoped limits"   "0"       "$(jq -r '.scoped_limits | length' "$_QL_CACHE")"
+_ql_parse_cache
+check "QR pct"             "0.9"     "${QUOTA_RESULT[pct]:-}"
+check "QR weekly_pct"      "26.19"   "${QUOTA_RESULT[weekly_pct]:-}"
+check "QR balance_usd"     "0.73493" "${QUOTA_RESULT[balance_usd]:-}"
+check "QR scoped_worst"    ""        "${QUOTA_RESULT[scoped_worst]:-}"
+
+echo "=== TEST 17: an exhausted window still reports the purchased balance ==="
+spent_body=$(jq -n --arg f5 "$FUT_5H" --arg fw "$FUT_WK" '{
+  included: {
+    session: {remaining_percent: 0, resets_at: $f5},
+    weekly:  {remaining_percent: 40, resets_at: $fw}
+  },
+  purchased: {balance_usd: 12.5}
+}')
+_ql_write "$(_ql_build_success_ollama "$spent_body" "$(_ql_now_utc)")"
+_ql_parse_cache
+check "5h spent"           "100"     "${QUOTA_RESULT[pct]:-}"
+check "balance visible"    "12.5"    "${QUOTA_RESULT[balance_usd]:-}"
+
+echo "=== TEST 18: a failed Ollama fetch keeps the balance but drops spent windows ==="
+# The percentages describe a window that has since rolled over, so they are
+# provably wrong; the purchased balance has no window and is still true.
+prev=$(jq -n --arg p "$PAST" '{
+  provider:"ollama",
+  current_session:{percent_used:80,resets_at:$p,resets_in:"",percent_unknown:false},
+  weekly_limits:{percent_used:26,resets_at:$p,resets_in:"",percent_unknown:false},
+  scoped_limits:[], purchased_balance_usd: 0.73493,
+  quota_used_pct:80, weekly_used_pct:26, valid:true, stale:false,
+  consecutive_failures:0
+}')
+_ql_write "$(_ql_build_stale "$prev" "$(_ql_now_utc)" "Rate limited by Ollama (HTTP 429)." "429")"
+_ql_parse_cache
+check "5h dropped"          ""        "${QUOTA_RESULT[pct]:-}"
+check "5h flagged unknown"  "true"    "${QUOTA_RESULT[pct_unknown]:-}"
+check "balance carried"     "0.73493" "${QUOTA_RESULT[balance_usd]:-}"
+check "stale"               "true"    "${QUOTA_RESULT[stale]:-}"
+check "failures counted"    "1"       "$(jq -r '.consecutive_failures' "$_QL_CACHE")"
+_QL_PROVIDER="anthropic"
+
 echo
 if (( fails == 0 )); then echo "ALL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; fi
 exit $(( fails > 0 ? 1 : 0 ))

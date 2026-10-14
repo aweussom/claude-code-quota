@@ -125,6 +125,18 @@ elif [[ "${QUOTA_RESULT[weekly_pct_unknown]:-false}" == "true" ]]; then
     parts+=("${cYellow}7d:?⚠${cReset}")
 fi
 
+# Purchased credit (Ollama sessions only). Hidden until an included window is
+# spent, because that is the point where requests start costing money.
+bal="${QUOTA_RESULT[balance_usd]:-}"
+if [[ -n "$bal" && "$bal" != "null" ]] && awk "BEGIN{exit !($bal + 0 > 0)}" 2>/dev/null; then
+    for _p in "$qpct" "$wpct"; do
+        if [[ -n "$_p" && "$_p" != "null" ]] && awk "BEGIN{exit !($_p + 0 >= 100)}" 2>/dev/null; then
+            parts+=("${cYellow}$(printf '$%.2f' "$bal")${cReset}")
+            break
+        fi
+    done
+fi
+
 # Model/surface-scoped limit (e.g. a per-model weekly cap) — a separate
 # allowance from 5h/7d, so it gets its own segment rather than replacing one.
 # Absent for accounts with no scoped limits, so this normally prints nothing.

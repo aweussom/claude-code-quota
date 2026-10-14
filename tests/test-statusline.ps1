@@ -87,6 +87,58 @@ Check "no error text"      "" ([string]($full | Select-String -Pattern "InvalidO
 Check "no quota segments"  "" ([string]($full | Select-String -Pattern "5h:|7d:|quota:" | Select-Object -First 1))
 Check "ctx still rendered" "ctx:37%" ((($full -split "\s*\|\s*") | Where-Object { $_ -like "ctx:*" }) -join "")
 
+# Provider segments. A private USERPROFILE holding quota-lib.ps1 and a cache:
+# the TTL keeps Invoke-QuotaGet from fetching, so neither case touches the
+# network or consumes an allowance.
+Write-Host "`n-- provider segments (synthetic cache, no network)" -ForegroundColor Cyan
+$QHome = Join-Path $Tmp "home"
+New-Item -ItemType Directory -Path (Join-Path $QHome ".claude") -Force | Out-Null
+Copy-Item (Join-Path $Root "quota-lib.ps1") (Join-Path $QHome ".claude\quota-lib.ps1")
+
+function RenderWith {
+    param([string]$BaseUrl, [string]$SessionJson)
+    $savedProfile = $env:USERPROFILE
+    $savedBase    = $env:ANTHROPIC_BASE_URL
+    try {
+        $env:USERPROFILE = $QHome
+        $env:ANTHROPIC_BASE_URL = $BaseUrl
+        $out = $SessionJson | & ([Environment]::ProcessPath) -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Sl 2>&1 | Out-String
+    } finally {
+        $env:USERPROFILE = $savedProfile
+        if ($null -eq $savedBase) { Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:ANTHROPIC_BASE_URL = $savedBase }
+    }
+    return ($out -replace "`e\[[0-9;]*m", "").Trim()
+}
+
+# An Ollama session with the 5h window spent: no scoped segment, and the
+# purchased balance shows because requests now cost money.
+@{
+    schema_version  = 3
+    provider        = "ollama"
+    current_session = @{ percent_used = 100;   resets_at = (Get-Date).ToUniversalTime().AddHours(2).ToString("yyyy-MM-ddTHH:mm:ssZ"); resets_in = ""; percent_unknown = $false }
+    weekly_limits   = @{ percent_used = 26.19; resets_at = (Get-Date).ToUniversalTime().AddDays(3).ToString("yyyy-MM-ddTHH:mm:ssZ");  resets_in = ""; percent_unknown = $false }
+    scoped_limits   = @()
+    purchased_balance_usd = 0.73493
+    quota_used_pct  = 100
+    weekly_used_pct = 26.19
+    valid = $true; stale = $false; consecutive_failures = 0
+} | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $QHome ".claude\quota-data-ollama.json") -Encoding UTF8
+
+$out = RenderWith "http://127.0.0.1:11434" (StrJson "glm-5.3-flash:cloud")
+Write-Host ("  " + $out)
+Check "ollama: 5h segment"    "yes" $(if ($out -match "5h:100%")   { "yes" } else { "no" })
+Check "ollama: 7d segment"    "yes" $(if ($out -match "7d:26\.19%"){ "yes" } else { "no" })
+Check "ollama: balance shown" "yes" $(if ($out -match "\`$0\.73")  { "yes" } else { "no" })
+Check "ollama: no scoped"     "no"  $(if ($out -match "Fable")     { "yes" } else { "no" })
+
+# Some other gateway: the Anthropic numbers do not describe this session and we
+# have none for whatever does, so no quota segments at all.
+$out = RenderWith "http://127.0.0.1:4000" (StrJson "some-model")
+Write-Host ("  " + $out)
+Check "other: no quota segments" "no"  $(if ($out -match "5h:|7d:|quota:") { "yes" } else { "no" })
+Check "other: ctx kept"          "yes" $(if ($out -match "ctx:37%")        { "yes" } else { "no" })
+
 Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 Write-Host ""
 if ($script:Fails -eq 0) { Write-Host "ALL CHECKS PASSED" -ForegroundColor Green; exit 0 }

@@ -156,6 +156,25 @@ if ($wpct -ne "") {
     $parts.Add("${cYellow}7d:?⚠${cReset}")
 }
 
+# Purchased credit (Ollama sessions only). Hidden until an included window is
+# spent, because that is the point where requests start costing money.
+$bal = [string]$QuotaResult['balance_usd']
+if ($bal -ne "") {
+    $balNum = 0.0
+    if ([double]::TryParse($bal, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$balNum) -and $balNum -gt 0) {
+        foreach ($p in @($qpct, $wpct)) {
+            $pNum = 0.0
+            if ($p -ne "" -and [double]::TryParse($p, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$pNum) -and $pNum -ge 100) {
+                # InvariantCulture: "N2" under a Norwegian locale renders
+                # "$0,73", which both reads wrong and disagrees with the bash
+                # statusline on the same account.
+                $parts.Add($cYellow + '$' + $balNum.ToString("0.00", [cultureinfo]::InvariantCulture) + $cReset)
+                break
+            }
+        }
+    }
+}
+
 # Model/surface-scoped limit (e.g. a per-model weekly cap) — a separate
 # allowance from 5h/7d, so it gets its own segment rather than replacing one.
 # Absent for accounts with no scoped limits, so this normally prints nothing.

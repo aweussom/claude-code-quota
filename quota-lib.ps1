@@ -30,13 +30,22 @@
 #       Set-StrictMode or alter error-action preferences at script scope.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-$script:_QL_Version = "2.0.0"
+$script:_QL_Version = "2.1.0"
 $script:_QL_Cache   = "$env:USERPROFILE\.claude\quota-data.json"
 $script:_QL_Lock    = "$env:USERPROFILE\.claude\.quota-fetch.lock"
 $script:_QL_Creds   = "$env:USERPROFILE\.claude\.credentials.json"
 $script:_QL_Api     = "https://api.anthropic.com/api/oauth/usage"
 $script:_QL_Beta    = "oauth-2025-04-20"
 $script:_QL_Timeout = 20
+
+# `ollama launch claude` points Claude Code at the local Ollama daemon, so the
+# session spends an Ollama allowance and no Anthropic quota at all.  Separate
+# cache and lock: a different account with different semantics, and both may be
+# in use on the same machine at the same time.
+$script:_QL_OllamaApi   = "https://ollama.com/api/balance"
+$script:_QL_OllamaCache = "$env:USERPROFILE\.claude\quota-data-ollama.json"
+$script:_QL_OllamaLock  = "$env:USERPROFILE\.claude\.quota-fetch-ollama.lock"
+$script:_QL_Provider    = "anthropic"
 # A held lock older than this is treated as abandoned.  Needed because PIDs get
 # recycled: without an age bound, a lock whose PID is reused by an unrelated
 # process reads as a live fetch and blocks refreshes indefinitely.
@@ -58,6 +67,43 @@ $script:QuotaResult = @{
     scoped_worst           = ""
     scoped_worst_pct       = ""
     scoped_worst_resets_in = ""
+    balance_usd            = ""
+    provider               = "anthropic"
+}
+
+# ── Internal: which account this session spends ──────────────────────────────
+#
+# ANTHROPIC_BASE_URL is the only reliable signal: a wrapper sets it before
+# starting Claude Code, and the statusline inherits it.  The model ID is not
+# enough — a gateway can serve claude-* names from somewhere else entirely.
+#
+# Ollama is claimed only on its own port or its own host.  Any other local
+# proxy (litellm and friends) is "other": we can prove the Anthropic numbers
+# are wrong, but we have nothing to put in their place.
+function _QL_ResolveProvider {
+    $base = $env:ANTHROPIC_BASE_URL
+    if ([string]::IsNullOrWhiteSpace($base)) { return "anthropic" }
+
+    $hostPart = $base -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''
+    $hostPart = ($hostPart -split '[/?#]')[0]
+
+    if ($hostPart -match '^api\.anthropic\.com(:\d+)?$') { return "anthropic" }
+    if ($hostPart -match '(^|\.)ollama\.com(:\d+)?$')    { return "ollama" }
+    if ($hostPart -match '^(127\.0\.0\.1|localhost|\[::1\]):11434$') { return "ollama" }
+    return "other"
+}
+
+# Point the cache, lock and endpoint at the provider this session is spending.
+# Called from Invoke-QuotaGet and again from Invoke-QuotaFetchOnce, because the
+# background worker reaches the fetch without going through Invoke-QuotaGet.
+function _QL_UseProvider {
+    $script:_QL_Provider = _QL_ResolveProvider
+    if ($script:_QL_Provider -eq "ollama") {
+        $script:_QL_Cache = $script:_QL_OllamaCache
+        $script:_QL_Lock  = $script:_QL_OllamaLock
+        $script:_QL_Api   = $script:_QL_OllamaApi
+    }
+    return $script:_QL_Provider
 }
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -77,6 +123,21 @@ Cache TTL in seconds.  Default: 60.
 #>
 function Invoke-QuotaGet {
     param([int]$Ttl = 60)
+
+    if ((_QL_UseProvider) -eq "other") {
+        # Some other gateway is answering.  We know the Anthropic figures do not
+        # describe this session, and we have no numbers for whatever does, so
+        # report nothing rather than something wrong.
+        $script:QuotaResult = @{
+            pct = ""; weekly_pct = ""; resets_in = ""; weekly_resets_in = ""
+            stale = "false"; valid = "false"; error = ""
+            pct_unknown = "false"; weekly_pct_unknown = "false"
+            scoped_summary = ""; scoped_alert = "false"; scoped_worst = ""
+            scoped_worst_pct = ""; scoped_worst_resets_in = ""
+            balance_usd = ""; provider = "other"
+        }
+        return
+    }
 
     # Taper retries after repeated failures so a failing endpoint isn't hit on
     # every refresh: 60s, 120s, 240s ... capped at 15 min.  Uses the
@@ -139,6 +200,7 @@ function Invoke-QuotaGet {
     }
 
     _QL_ParseCache
+    $script:QuotaResult.provider = $script:_QL_Provider
 }
 
 # ── Internal: fetch lock ──────────────────────────────────────────────────────
@@ -562,9 +624,18 @@ function _QL_BuildStale {
         }
     }
 
+    # Purchased balance does not reset on a window boundary, so unlike the
+    # percentages it is still true when a fetch fails.
+    $balance = $null
+    if ($null -ne $Previous) {
+        $b = _QL_GetObjectValue $Previous @("purchased_balance_usd")
+        if ($null -ne $b) { try { $balance = [double]$b } catch { $balance = $null } }
+    }
+
     $payload = [ordered]@{
         schema_version       = 3
         lib_version          = $script:_QL_Version
+        provider             = $script:_QL_Provider
         source_url           = $sourceUrl
         attempted_at_utc     = $NowUtc
         fetched_at_utc       = $fetchedAt
@@ -577,6 +648,7 @@ function _QL_BuildStale {
             used_credits  = $extraCredits
             monthly_limit = $extraLimit
         }
+        purchased_balance_usd = $balance
         quota_used_pct       = $curPct
         weekly_used_pct      = $weeklyPct
         resets_in            = $curIn
@@ -605,6 +677,8 @@ Called synchronously on first run, or from _quota-fetch-helper.ps1 in the
 background on subsequent stale-cache refreshes.
 #>
 function Invoke-QuotaFetchOnce {
+    if ((_QL_UseProvider) -eq "ollama") { Invoke-QuotaFetchOnceOllama; return }
+
     $nowUtc = _QL_NowUtc
     $token  = _QL_GetToken
 
@@ -652,6 +726,123 @@ function Invoke-QuotaFetchOnce {
     _QL_Write $payload
 }
 
+<#
+.SYNOPSIS
+Fetches https://ollama.com/api/balance and writes quota-data-ollama.json.
+
+.DESCRIPTION
+Response shape:
+  {"included":{"session":{"remaining_percent":99.1,"resets_at":"..."},
+               "weekly": {"remaining_percent":73.81,"resets_at":"..."}},
+   "purchased":{"balance_usd":0.73493}}
+
+Undocumented, and it moved from /api/usage during an October 2026 deploy, so a
+body without .included counts as a failure rather than as "no limits".
+#>
+function Invoke-QuotaFetchOnceOllama {
+    $nowUtc = _QL_NowUtc
+    $token  = $env:OLLAMA_API_KEY
+
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $prev = _QL_ReadCacheRaw
+        _QL_Write (_QL_BuildStale $prev $nowUtc "OLLAMA_API_KEY is not set." $null)
+        return
+    }
+
+    $headers = @{
+        "Authorization" = "Bearer $token"
+        "Accept"        = "application/json"
+    }
+
+    try {
+        $data = Invoke-RestMethod -Method Get -Uri $script:_QL_OllamaApi -Headers $headers `
+                    -TimeoutSec $script:_QL_Timeout -ErrorAction Stop
+        if ($null -eq $data -or $null -eq $data.included) {
+            $prev    = _QL_ReadCacheRaw
+            $payload = _QL_BuildStale $prev $nowUtc "Ollama response could not be parsed (no included block)." 200
+        } else {
+            $payload = _QL_BuildSuccessOllama $data $nowUtc
+        }
+    } catch {
+        $statusCode = $null
+        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+
+        $msg = if ($statusCode -eq 401) {
+            "Ollama API key rejected (HTTP 401)."
+        } elseif ($statusCode -eq 429) {
+            "Rate limited by Ollama (HTTP 429)."
+        } elseif ($null -ne $statusCode) {
+            "Ollama request failed (HTTP $statusCode)."
+        } else {
+            "Request failed (network error or timeout)."
+        }
+
+        $prev    = _QL_ReadCacheRaw
+        $payload = _QL_BuildStale $prev $nowUtc $msg $statusCode
+    }
+
+    _QL_Write $payload
+}
+
+# Ollama reports what is LEFT; everything downstream is in percent USED.
+function _QL_BuildSuccessOllama {
+    param($BalanceData, [string]$Ts)
+
+    $session = $BalanceData.included.session
+    $weekly  = $BalanceData.included.weekly
+
+    $curPct = $null
+    if ($null -ne $session -and $null -ne $session.remaining_percent) {
+        $curPct = _QL_NormalizePercent (100 - [double]$session.remaining_percent)
+    }
+    $curAt = if ($null -ne $session -and $null -ne $session.resets_at) { _QL_DateToIso $session.resets_at } else { "" }
+    $curIn = if (-not [string]::IsNullOrWhiteSpace($curAt)) { _QL_GetTimeUntil $curAt } else { "" }
+
+    $weeklyPct = $null
+    if ($null -ne $weekly -and $null -ne $weekly.remaining_percent) {
+        $weeklyPct = _QL_NormalizePercent (100 - [double]$weekly.remaining_percent)
+    }
+    $weeklyAt = if ($null -ne $weekly -and $null -ne $weekly.resets_at) { _QL_DateToIso $weekly.resets_at } else { "" }
+    $weeklyIn = if (-not [string]::IsNullOrWhiteSpace($weeklyAt)) { _QL_GetTimeUntil $weeklyAt } else { "" }
+
+    $balance = $null
+    if ($null -ne $BalanceData.purchased -and $null -ne $BalanceData.purchased.balance_usd) {
+        try { $balance = [double]$BalanceData.purchased.balance_usd } catch { $balance = $null }
+    }
+
+    # Same schema as the Anthropic path, so _QL_ParseCache and the statusline
+    # templates need no provider-specific branches.  scoped_limits is empty
+    # because Ollama has no per-model allowances: that is what stops a stale
+    # "Fable:0%" segment following you into an Ollama session.
+    $payload = [ordered]@{
+        schema_version        = 3
+        lib_version           = $script:_QL_Version
+        provider              = "ollama"
+        source_url            = $script:_QL_OllamaApi
+        attempted_at_utc      = $Ts
+        fetched_at_utc        = $Ts
+        current_session       = [ordered]@{ percent_used = $curPct;    resets_at = $curAt;    resets_in = $curIn;    percent_unknown = $false }
+        weekly_limits         = [ordered]@{ percent_used = $weeklyPct; resets_at = $weeklyAt; resets_in = $weeklyIn; percent_unknown = $false }
+        scoped_limits         = @()
+        extra_usage           = [ordered]@{ is_enabled = $null; utilization = $null; used_credits = $null; monthly_limit = $null }
+        purchased_balance_usd = $balance
+        quota_used_pct        = $curPct
+        weekly_used_pct       = $weeklyPct
+        resets_in             = $curIn
+        weekly_resets         = $weeklyIn
+        updated               = $Ts
+        valid                 = $true
+        stale                 = $false
+        stale_since           = $null
+        stale_reason          = ""
+        last_success_updated  = $Ts
+        error                 = ""
+        api_status_code       = 200
+        consecutive_failures  = 0
+    }
+    return $payload | ConvertTo-Json -Depth 10
+}
+
 # ── Internal: populate $QuotaResult from cache ────────────────────────────────
 
 function _QL_ParseCache {
@@ -670,6 +861,8 @@ function _QL_ParseCache {
         scoped_worst           = ""
         scoped_worst_pct       = ""
         scoped_worst_resets_in = ""
+        balance_usd            = ""
+        provider               = $script:_QL_Provider
     }
 
     if (-not (Test-Path $script:_QL_Cache -PathType Leaf)) { return }
@@ -686,6 +879,13 @@ function _QL_ParseCache {
 
     $v = _QL_GetObjectValue $data @("weekly_used_pct")
     if ($null -ne $v) { $script:QuotaResult['weekly_pct'] = [string]$v }
+
+    # Invariant culture: a comma decimal separator would reach the statusline
+    # and break the numeric comparison that decides whether to show it.
+    $v = _QL_GetObjectValue $data @("purchased_balance_usd")
+    if ($null -ne $v) {
+        try { $script:QuotaResult['balance_usd'] = ([double]$v).ToString([cultureinfo]::InvariantCulture) } catch {}
+    }
 
     # Recompute countdowns from the stored timestamps rather than trusting the
     # strings written at fetch time.  On a cache hit those strings are as old as

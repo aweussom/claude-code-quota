@@ -31,13 +31,22 @@
 #       statusline script and must not alter the parent shell's error behaviour.
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_QL_VERSION="2.0.0"
+_QL_VERSION="2.1.0"
 _QL_CACHE="${HOME}/.claude/quota-data.json"
 _QL_LOCK="${HOME}/.claude/.quota-fetch.lock"
 _QL_CREDS="${HOME}/.claude/.credentials.json"
 _QL_API="https://api.anthropic.com/api/oauth/usage"
 _QL_BETA="oauth-2025-04-20"
 _QL_TIMEOUT=20
+
+# `ollama launch claude` points Claude Code at the local Ollama daemon, so the
+# session spends an Ollama allowance and no Anthropic quota at all.  Separate
+# cache and lock: a different account with different semantics, and both may be
+# in use on the same machine at the same time.
+_QL_OLLAMA_API="https://ollama.com/api/balance"
+_QL_OLLAMA_CACHE="${HOME}/.claude/quota-data-ollama.json"
+_QL_OLLAMA_LOCK="${HOME}/.claude/.quota-fetch-ollama.lock"
+_QL_PROVIDER="anthropic"
 # A held lock older than this is treated as abandoned.  Needed because PIDs get
 # recycled: without an age bound, a lock whose PID is reused by an unrelated
 # process reads as a live fetch and blocks refreshes indefinitely.
@@ -53,6 +62,23 @@ declare -gA QUOTA_RESULT
 #   Always populates QUOTA_RESULT[] from whatever is in the cache file.
 quota_get() {
     local ttl="${1:-60}"
+
+    _QL_PROVIDER=$(_ql_provider)
+    case "$_QL_PROVIDER" in
+        ollama)
+            _QL_CACHE="$_QL_OLLAMA_CACHE"
+            _QL_LOCK="$_QL_OLLAMA_LOCK"
+            _QL_API="$_QL_OLLAMA_API"
+            ;;
+        other)
+            # Some other gateway is answering.  We know the Anthropic figures do
+            # not describe this session, and we have no numbers for whatever does,
+            # so report nothing rather than something wrong.
+            QUOTA_RESULT=()
+            QUOTA_RESULT[provider]="other"
+            return 0
+            ;;
+    esac
 
     # Taper retries after repeated failures so a failing endpoint isn't hit on
     # every refresh: 60s, 120s, 240s ... capped at 15 min.  Uses the
@@ -95,6 +121,32 @@ quota_get() {
     fi
 
     _ql_parse_cache
+    QUOTA_RESULT[provider]="$_QL_PROVIDER"
+}
+
+# ── Internal: which account this session spends ──────────────────────────────
+#
+# ANTHROPIC_BASE_URL is the only reliable signal: a wrapper sets it before
+# starting Claude Code, and the statusline inherits it.  The model ID is not
+# enough — a gateway can serve claude-* names from somewhere else entirely.
+#
+# Ollama is claimed only on its own port or its own host.  Any other local
+# proxy (litellm and friends) is "other": we can prove the Anthropic numbers
+# are wrong, but we have nothing to put in their place.
+_ql_provider() {
+    local base="${ANTHROPIC_BASE_URL:-}"
+    [[ -z "${base//[[:space:]]/}" ]] && { echo "anthropic"; return; }
+
+    local host="${base#*://}"
+    host="${host%%/*}"
+    host="${host%%\?*}"
+
+    case "$host" in
+        api.anthropic.com|api.anthropic.com:*) echo "anthropic" ;;
+        *ollama.com|*ollama.com:*)             echo "ollama" ;;
+        127.0.0.1:11434|localhost:11434|\[::1\]:11434) echo "ollama" ;;
+        *) echo "other" ;;
+    esac
 }
 
 # ── Internal: fetch lock ──────────────────────────────────────────────────────
@@ -130,6 +182,8 @@ _ql_try_lock() {
 
 _ql_fetch_once() {
     local now token tmpfile http_code curl_rc body payload prev
+
+    [[ "$_QL_PROVIDER" == "ollama" ]] && { _ql_fetch_once_ollama; return $?; }
 
     now=$(_ql_now_utc)
 
@@ -172,6 +226,121 @@ _ql_fetch_once() {
     fi
 
     _ql_write "$payload"
+}
+
+# GET https://ollama.com/api/balance, Bearer OLLAMA_API_KEY:
+#   {"included":{"session":{"remaining_percent":99.1,"resets_at":"..."},
+#                "weekly": {"remaining_percent":73.81,"resets_at":"..."}},
+#    "purchased":{"balance_usd":0.73493}}
+#
+# Undocumented, and it moved from /api/usage during an October 2026 deploy, so
+# treat a body without .included as a failure rather than as "no limits".
+_ql_fetch_once_ollama() {
+    local now token tmpfile http_code curl_rc body payload prev
+
+    now=$(_ql_now_utc)
+
+    token="${OLLAMA_API_KEY:-}"
+    if [[ -z "$token" ]]; then
+        prev=$(_ql_read_cache_raw)
+        _ql_write "$(_ql_build_stale "$prev" "$now" "OLLAMA_API_KEY is not set." "null")"
+        return 1
+    fi
+
+    tmpfile=$(mktemp)
+    curl_rc=0
+    http_code=$(curl -s -o "$tmpfile" -w "%{http_code}" \
+        --max-time "$_QL_TIMEOUT" \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        "$_QL_OLLAMA_API" 2>/dev/null) || curl_rc=$?
+    body=$(cat "$tmpfile"); rm -f "$tmpfile"
+
+    if [[ $curl_rc -ne 0 || -z "$http_code" || "$http_code" == "000" ]]; then
+        prev=$(_ql_read_cache_raw)
+        payload=$(_ql_build_stale "$prev" "$now" "Request failed (network error or timeout)." "null")
+    elif [[ "$http_code" == "200" ]]; then
+        if echo "$body" | jq -e '.included != null' >/dev/null 2>&1; then
+            payload=$(_ql_build_success_ollama "$body" "$now")
+        else
+            prev=$(_ql_read_cache_raw)
+            payload=$(_ql_build_stale "$prev" "$now" "Ollama response could not be parsed (no included block)." "200")
+        fi
+    elif [[ "$http_code" == "401" ]]; then
+        prev=$(_ql_read_cache_raw)
+        payload=$(_ql_build_stale "$prev" "$now" "Ollama API key rejected (HTTP 401)." "401")
+    elif [[ "$http_code" == "429" ]]; then
+        prev=$(_ql_read_cache_raw)
+        payload=$(_ql_build_stale "$prev" "$now" "Rate limited by Ollama (HTTP 429)." "429")
+    else
+        prev=$(_ql_read_cache_raw)
+        payload=$(_ql_build_stale "$prev" "$now" "Ollama request failed (HTTP $http_code)." "$http_code")
+    fi
+
+    _ql_write "$payload"
+}
+
+# Ollama reports what is LEFT; everything downstream is in percent USED.
+_ql_build_success_ollama() {
+    local body="$1" ts="$2"
+    local cur_pct cur_at cur_in weekly_pct weekly_at weekly_in balance
+
+    cur_pct=$(_ql_norm_pct "$(echo "$body" | jq -r '
+        if (.included.session.remaining_percent // null) == null then "null"
+        else (100 - .included.session.remaining_percent) end')")
+    cur_at=$(echo "$body" | jq -r '.included.session.resets_at // ""')
+    cur_in=$( [[ -n "$cur_at" && "$cur_at" != "null" ]] && _ql_time_until "$cur_at" || echo "" )
+
+    weekly_pct=$(_ql_norm_pct "$(echo "$body" | jq -r '
+        if (.included.weekly.remaining_percent // null) == null then "null"
+        else (100 - .included.weekly.remaining_percent) end')")
+    weekly_at=$(echo "$body" | jq -r '.included.weekly.resets_at // ""')
+    weekly_in=$( [[ -n "$weekly_at" && "$weekly_at" != "null" ]] && _ql_time_until "$weekly_at" || echo "" )
+
+    balance=$(echo "$body" | jq '.purchased.balance_usd // null')
+    [[ "$balance" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || balance="null"
+
+    # Same schema as the Anthropic path, so _ql_parse_cache and the statusline
+    # templates need no provider-specific branches.  scoped_limits is empty
+    # because Ollama has no per-model allowances: that is what stops a stale
+    # "Fable:0%" segment following you into an Ollama session.
+    jq -n \
+        --arg     src        "$_QL_OLLAMA_API" \
+        --arg     ts         "$ts" \
+        --argjson cur_pct    "$cur_pct" \
+        --arg     cur_at     "$cur_at" \
+        --arg     cur_in     "$cur_in" \
+        --argjson weekly_pct "$weekly_pct" \
+        --arg     weekly_at  "$weekly_at" \
+        --arg     weekly_in  "$weekly_in" \
+        --argjson balance    "$balance" \
+        --arg     ver        "$_QL_VERSION" \
+        '{
+            schema_version:       3,
+            lib_version:          $ver,
+            provider:             "ollama",
+            source_url:           $src,
+            attempted_at_utc:     $ts,
+            fetched_at_utc:       $ts,
+            current_session:      { percent_used: $cur_pct,    resets_at: $cur_at,    resets_in: $cur_in,    percent_unknown: false },
+            weekly_limits:        { percent_used: $weekly_pct, resets_at: $weekly_at, resets_in: $weekly_in, percent_unknown: false },
+            scoped_limits:        [],
+            extra_usage:          { is_enabled: null, utilization: null, used_credits: null, monthly_limit: null },
+            purchased_balance_usd: $balance,
+            quota_used_pct:       $cur_pct,
+            weekly_used_pct:      $weekly_pct,
+            resets_in:            $cur_in,
+            weekly_resets:        $weekly_in,
+            updated:              $ts,
+            valid:                true,
+            stale:                false,
+            stale_since:          null,
+            stale_reason:         "",
+            last_success_updated: $ts,
+            error:                "",
+            api_status_code:      200,
+            consecutive_failures: 0
+        }'
 }
 
 # ── Internal: small helpers ───────────────────────────────────────────────────
@@ -387,6 +556,7 @@ _ql_build_stale() {
     local stale_since="$now_utc" prev_failures=0
     local scoped="[]"
     local cur_unknown="false" weekly_unknown="false"
+    local balance="null"
 
     # Only a *failed* fetch carries scoped limits forward — a successful one is
     # authoritative, including by omission.
@@ -428,6 +598,11 @@ _ql_build_stale() {
         xena_pct=$(_ql_norm_pct "$(echo "$prev" | jq -r '.extra_usage.utilization // "null"')")
         xena_cred=$(echo "$prev" | jq '.extra_usage.used_credits // null')
         xena_lim=$(echo "$prev"  | jq '.extra_usage.monthly_limit // null')
+
+        # Purchased balance does not reset on a window boundary, so unlike the
+        # percentages it is still true when a fetch fails.
+        balance=$(echo "$prev" | jq '.purchased_balance_usd // null')
+        [[ "$balance" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || balance="null"
 
         v=$(echo "$prev" | jq -r '.source_url // empty')
         [[ -n "$v" ]] && src="$v"
@@ -508,11 +683,14 @@ _ql_build_stale() {
         --argjson scoped      "$scoped" \
         --argjson cur_unk     "$cur_unknown" \
         --argjson weekly_unk  "$weekly_unknown" \
+        --argjson balance     "$balance" \
+        --arg     provider    "$_QL_PROVIDER" \
         --arg     last_suc    "$last_success" \
         --arg     ver         "$_QL_VERSION" \
         '{
             schema_version:       3,
             lib_version:          $ver,
+            provider:             $provider,
             source_url:           $src,
             attempted_at_utc:     $now,
             fetched_at_utc:       $fetched_at,
@@ -520,6 +698,7 @@ _ql_build_stale() {
             weekly_limits:        { percent_used: $weekly_pct, resets_at: $weekly_at, resets_in: $weekly_in, percent_unknown: $weekly_unk },
             scoped_limits:        $scoped,
             extra_usage:          { is_enabled: $xena_ena, utilization: $xena_pct, used_credits: $xena_cred, monthly_limit: $xena_lim },
+            purchased_balance_usd: $balance,
             quota_used_pct:       $cur_pct,
             weekly_used_pct:      $weekly_pct,
             resets_in:            $cur_in,
@@ -559,7 +738,8 @@ _ql_parse_cache() {
         (.valid                     // false | tostring),
         (.error                     // .stale_reason // ""),
         (if (.current_session.percent_unknown // false) then "true" else "false" end),
-        (if (.weekly_limits.percent_unknown   // false) then "true" else "false" end)
+        (if (.weekly_limits.percent_unknown   // false) then "true" else "false" end),
+        (.purchased_balance_usd     // "" | tostring)
     ] | join("")' "$_QL_CACHE" 2>/dev/null) || {
         QUOTA_RESULT[error]="Cannot parse quota-data.json (delete it to reset)."
         return
@@ -578,6 +758,7 @@ _ql_parse_cache() {
         QUOTA_RESULT[error] \
         QUOTA_RESULT[pct_unknown] \
         QUOTA_RESULT[weekly_pct_unknown] \
+        QUOTA_RESULT[balance_usd] \
         <<< "$fields"
 
     # Derive the countdowns from the stored timestamps instead of trusting the

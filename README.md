@@ -89,6 +89,44 @@ your statusline script:
 
 ---
 
+## Sessions that do not spend Anthropic quota
+
+`ollama launch claude --model glm-5.3-flash:cloud` runs Claude Code against
+the local Ollama daemon. No Anthropic quota is spent, but the status line
+still showed the Anthropic numbers. Real numbers, just about the wrong
+account.
+
+The library now decides from `ANTHROPIC_BASE_URL`, not from the model ID. A
+gateway can serve `claude-*` names from anywhere.
+
+Under Ollama it reads `https://ollama.com/api/balance` with your
+`OLLAMA_API_KEY` and shows that account's windows instead:
+
+```
+glm-5.3-flash:cloud | main | ctx:17% | 5h:1% ~3h39m | 7d:26% ~4d12h
+```
+
+Ollama reports what is left; the status line shows percent used, same as for
+Anthropic. No scoped segment because Ollama has no per-model allowances. Once
+an included window is spent, the purchased balance appears, since that is when
+requests start costing money:
+
+```
+glm-5.3-flash:cloud | main | ctx:17% | 5h:100% | 7d:26% ~4d12h | $0.73
+```
+
+Point `ANTHROPIC_BASE_URL` at any other gateway and you get no quota segments
+at all. The Anthropic figures are provably wrong for that session and there is
+nothing to replace them with, so the segments are left out rather than filled
+with a guess.
+
+Each provider has its own cache and lock file, so a Windows session on Ollama
+and a WSL2 session on Anthropic do not overwrite each other.
+
+The endpoint is undocumented, and it moved from `/api/usage` to `/api/balance`
+during an October 2026 deploy. A response without the `included` block counts
+as a failed fetch, not as "no limits".
+
 ## Windows 11 / PowerShell
 
 No WSL required. Uses `Invoke-RestMethod` and `ConvertFrom-Json` — no `jq`,
@@ -428,12 +466,16 @@ See the `$QuotaResult` notes above for how scoped limits are derived and why
 
 ## Cache file format
 
-`~/.claude/quota-data.json` (same path on Windows) — schema version 3:
+`~/.claude/quota-data.json` (same path on Windows) — schema version 3. An
+Ollama session writes the same schema to `~/.claude/quota-data-ollama.json`,
+with `provider` set to `ollama`, `scoped_limits` empty and
+`purchased_balance_usd` filled in:
 
 ```json
 {
   "schema_version": 3,
-  "lib_version": "2.0.0",
+  "lib_version": "2.1.0",
+  "provider": "anthropic",
   "current_session": { "percent_used": 68, "resets_at": "...", "resets_in": "1 hr 12 min", "percent_unknown": false },
   "weekly_limits":   { "percent_used": 31, "resets_at": "...", "resets_in": "4 d 2 hr 5 min", "percent_unknown": false },
   "scoped_limits":   [
@@ -441,6 +483,7 @@ See the `$QuotaResult` notes above for how scoped limits are derived and why
       "severity": "critical", "resets_at": "...", "resets_in": "1d2h", "is_active": true }
   ],
   "extra_usage":     { "is_enabled": null, "utilization": null, "used_credits": null, "monthly_limit": null },
+  "purchased_balance_usd": null,
   "quota_used_pct":  68,
   "weekly_used_pct": 31,
   "resets_in":       "1 hr 12 min",

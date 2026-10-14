@@ -18,4 +18,6 @@ if (Test-Path $libPath -PathType Leaf) {
 
 Invoke-QuotaFetchOnce
 
-Remove-Item "$env:USERPROFILE\.claude\.quota-fetch.lock" -ErrorAction SilentlyContinue
+# Not the hardcoded Anthropic path: Invoke-QuotaFetchOnce points $_QL_Lock at
+# the provider this session spends, and an Ollama session locks a different file.
+Remove-Item $script:_QL_Lock -ErrorAction SilentlyContinue

@@ -121,6 +121,46 @@ It once passed a `read` whose line continuations had become literal `\n`, which
 bash parsed as a variable named `n` — shifting every field by one. Syntactically
 valid, semantically wrong. **Always run the test suite, not just the linter.**
 
+### A session does not always spend Anthropic quota
+
+`ollama launch claude --model <model>` sets `ANTHROPIC_BASE_URL` to the local
+Ollama daemon (`127.0.0.1:11434`, `/v1/messages`) and starts Claude Code against
+it. Nothing of the Anthropic allowance is touched, but the statusline happily
+showed `5h:5% | 7d:9% | Fable:0%` anyway — numbers that were real, and about a
+different account than the one doing the work.
+
+**`ANTHROPIC_BASE_URL` is the only signal.** Not the model ID: a gateway can
+serve `claude-*` names from anywhere. Three outcomes:
+
+- unset, or `api.anthropic.com` → `anthropic`
+- `ollama.com`, or `11434` on loopback → `ollama`, read
+  `https://ollama.com/api/balance` with `Bearer $OLLAMA_API_KEY`
+- anything else → `other`, and **no quota segments at all**. We can prove the
+  Anthropic figures are wrong and have nothing to put in their place, so the
+  segments are omitted rather than filled with a guess.
+
+Ollama reports `remaining_percent`; everything downstream is percent *used*, so
+the builders convert. Its `scoped_limits` is always `[]` — that is what stops a
+cached `Fable:0%` following you into an Ollama session. `purchased_balance_usd`
+is the one field a failed fetch may carry forward unconditionally: it has no
+window, so it cannot go stale the way a percentage does.
+
+The two providers get separate cache and lock files (`quota-data-ollama.json`,
+`.quota-fetch-ollama.lock`). Both may be live on one machine at once, and the
+schemas describe different accounts.
+
+`_quota-fetch-helper.ps1` reaches the fetch without going through
+`Invoke-QuotaGet`, so `Invoke-QuotaFetchOnce` resolves the provider itself.
+The helper deletes `$script:_QL_Lock`, never a hardcoded path — an Ollama
+session holds a different lock.
+
+### PowerShell: `N2` formats in the current culture
+
+The purchased-balance segment rendered `$0,73` on a Norwegian machine while the
+bash statusline rendered `$0.73` for the same account. Any number heading for
+display or comparison goes through `[cultureinfo]::InvariantCulture`.
+`tests/test-statusline.ps1` asserts the literal `$0.73`.
+
 ## Design rules
 
 - **A successful fetch is authoritative, including by omission.** If the API
