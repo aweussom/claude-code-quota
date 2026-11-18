@@ -243,9 +243,10 @@ synthetic session JSON -- both `model` shapes Claude Code has sent, an unlisted
 family, and (PS) a machine with no quota-lib in reach. The PS one points
 USERPROFILE at an empty temp dir so nothing is fetched.
 
-`tests/test-quota-lib.ps1` covers encoding and version-gate invariants only —
-BOMs, `#Requires`, no `powershell.exe` fallback, and that every file parses. It
-has no fixtures. For logic changes, still verify against a live fetch *and* a
+`tests/test-quota-lib.ps1` covers encoding and version-gate invariants —
+BOMs, `#Requires`, no `powershell.exe` fallback, and that every file parses —
+plus one pure-function check: `_QL_BuildStale` must carry timestamps forward
+as ISO 8601, not as `[string]`-cast local DateTimes. For logic changes, still verify against a live fetch *and* a
 synthetic stale payload, including the rollover path.
 
 Shell scripts are for the Linux/WSL2 install; do not guard Windows behaviour

@@ -88,6 +88,38 @@ foreach ($f in $PsFiles) {
     }
 }
 
+# A failed fetch carries timestamps forward from a cache read by
+# ConvertFrom-Json, which has turned them into local-time DateTimes. A [string]
+# cast wrote "11/18/2026 01:00:00" back into the shared cache, and the overage
+# guard (Python, fromisoformat) crashed on it. _QL_BuildStale touches no disk
+# and no network, so it is tested directly. The output is checked as raw text:
+# parsing it with ConvertFrom-Json would hide the bug the same way.
+Hdr "Failed fetch keeps carried timestamps ISO 8601"
+. (Join-Path $Root "quota-lib.ps1")
+$prevJson = @'
+{"schema_version":3,"fetched_at_utc":"2026-11-18T01:00:00.000Z",
+ "last_success_updated":"2026-11-18T01:00:00.000Z","updated":"2026-11-18T01:00:00.000Z",
+ "valid":false,"stale":true,"stale_since":"2026-11-18T01:05:00.000Z","consecutive_failures":1,
+ "current_session":{"percent_used":10,"resets_at":"2099-01-01T00:00:00.000Z"},
+ "weekly_limits":{"percent_used":20,"resets_at":"2099-01-01T00:00:00.000Z"}}
+'@
+$staleJson = _QL_BuildStale ($prevJson | ConvertFrom-Json) "2026-11-18T07:00:00.000Z" "test failure" $null
+$isoFields = @{
+    fetched_at_utc       = "2026-11-18T01:00:00.000Z"
+    last_success_updated = "2026-11-18T01:00:00.000Z"
+    stale_since          = "2026-11-18T01:05:00.000Z"
+}
+foreach ($field in $isoFields.Keys) {
+    $want = $isoFields[$field]
+    if ($staleJson -match "`"$field`":\s*`"([^`"]*)`"") {
+        $got = $Matches[1]
+        if ($got -eq $want) { Ok "$field = $got" }
+        else                { Bad "$field = '$got', want '$want'" }
+    } else {
+        Bad "$field missing from the stale payload"
+    }
+}
+
 Pop-Location
 Write-Host ""
 if ($script:Fails -eq 0) {

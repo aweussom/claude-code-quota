@@ -589,15 +589,19 @@ function _QL_BuildStale {
         $v = _QL_GetObjectValue $Previous @("source_url")
         if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $sourceUrl = [string]$v }
 
-        $v = _QL_GetObjectValue $Previous @("fetched_at_utc")
-        if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $fetchedAt = [string]$v }
+        # _QL_DateToIso, not [string], for every carried timestamp: ConvertFrom-Json
+        # has already made these local-time DateTimes, and a [string] cast wrote
+        # "11/18/2026 01:00:00" back into the shared cache -- no UTC marker, locale
+        # format, unparseable as ISO by anything else that reads the file.
+        $v = _QL_DateToIso (_QL_GetObjectValue $Previous @("fetched_at_utc"))
+        if (-not [string]::IsNullOrWhiteSpace($v)) { $fetchedAt = $v }
 
-        $v = _QL_GetObjectValue $Previous @("last_success_updated")
-        if (-not [string]::IsNullOrWhiteSpace([string]$v)) {
-            $lastSuccess = [string]$v
+        $v = _QL_DateToIso (_QL_GetObjectValue $Previous @("last_success_updated"))
+        if (-not [string]::IsNullOrWhiteSpace($v)) {
+            $lastSuccess = $v
         } elseif ([bool](_QL_GetObjectValue $Previous @("valid"))) {
-            $v2 = _QL_GetObjectValue $Previous @("updated")
-            if (-not [string]::IsNullOrWhiteSpace([string]$v2)) { $lastSuccess = [string]$v2 }
+            $v2 = _QL_DateToIso (_QL_GetObjectValue $Previous @("updated"))
+            if (-not [string]::IsNullOrWhiteSpace($v2)) { $lastSuccess = $v2 }
         }
         if ([string]::IsNullOrWhiteSpace($lastSuccess) -and -not [string]::IsNullOrWhiteSpace($fetchedAt)) {
             $lastSuccess = $fetchedAt
@@ -605,8 +609,8 @@ function _QL_BuildStale {
 
         $oldStale = [bool](_QL_GetObjectValue $Previous @("stale"))
         if ($oldStale) {
-            $v = _QL_GetObjectValue $Previous @("stale_since")
-            if (-not [string]::IsNullOrWhiteSpace([string]$v)) { $staleSince = [string]$v }
+            $v = _QL_DateToIso (_QL_GetObjectValue $Previous @("stale_since"))
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $staleSince = $v }
         }
 
         $v = _QL_GetObjectValue $Previous @("consecutive_failures")
